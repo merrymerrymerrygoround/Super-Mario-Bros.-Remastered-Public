@@ -1,9 +1,9 @@
 diff --git a/.github/workflows/web-build.yml b/.github/workflows/web-build.yml
 new file mode 100644
-index 0000000..d52c89b
+index 0000000..0da3a80
 --- /dev/null
 +++ b/.github/workflows/web-build.yml
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,61 @@
 +name: "web build"
 +on:
 +  workflow_dispatch:
@@ -23,6 +23,8 @@ index 0000000..d52c89b
 +      - uses: actions/checkout@v4
 +        with:
 +          lfs: true
++      - name: Remove native GDExtensions (unsupported on Web)
++        run: rm -f godotgif/godotgif.gdextension addons/discord-rpc-gd/bin/discord-rpc-gd.gdextension
 +      - name: Install Godot + export templates
 +        run: |
 +          BASE=https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}
@@ -135,6 +137,38 @@ index 25d0cb3..b20c7d3 100644
  
  func _process(delta: float) -> void:
  	if multibind_action_just_pressed("debug_reload"):
+diff --git a/Scripts/Parts/ResourcePackLoader.gd b/Scripts/Parts/ResourcePackLoader.gd
+index 10ea6d1..fd247a1 100644
+--- a/Scripts/Parts/ResourcePackLoader.gd
++++ b/Scripts/Parts/ResourcePackLoader.gd
+@@ -24,6 +24,18 @@ func get_resource_packs() -> void:
+ 		if FileAccess.file_exists(pack_info_path) and i != Global.ROM_PACK_NAME:
+ 			create_container(Global.config_path.path_join("resource_packs/" + i))
+ 
++## GifManager comes from the godotgif GDExtension, which doesn't exist on Web
++## (or if the library fails to load), so look it up at runtime, not by name.
++func load_gif_icon(path: String) -> Texture2D:
++	var manager: Object = null
++	if Engine.has_singleton("GifManager"):
++		manager = Engine.get_singleton("GifManager")
++	elif ClassDB.class_exists("GifManager") and ClassDB.can_instantiate("GifManager"):
++		manager = ClassDB.instantiate("GifManager")
++	if manager == null:
++		return null
++	return manager.animated_texture_from_file(path)
++
+ func create_container(resource_pack := "") -> void:
+ 	var container = RESOURCE_PACK_CONTAINER.instantiate()
+ 	container.pack_json = JSONParser.parse_to_dict(resource_pack + "/pack_info.json")
+@@ -35,7 +47,7 @@ func create_container(resource_pack := "") -> void:
+ 		image.load(resource_pack + "/icon.png")
+ 		container.icon = ImageTexture.create_from_image(image)
+ 	elif FileAccess.file_exists(resource_pack + "/icon.gif"):
+-		container.icon = GifManager.animated_texture_from_file(resource_pack + "/icon.gif")
++		container.icon = load_gif_icon(resource_pack + "/icon.gif")
+ 	container.pack_id = resource_pack.replace(Global.config_path.path_join("resource_packs"), "").trim_prefix("/")
+ 	$"../ScrollContainer/VBoxContainer".add_child(container)
+ 	containers.append(container)
 diff --git a/Scripts/UI/RomResourceGenerator.gd b/Scripts/UI/RomResourceGenerator.gd
 index 734efe5..0ccbd58 100644
 --- a/Scripts/UI/RomResourceGenerator.gd

@@ -1,0 +1,686 @@
+diff --git a/.github/workflows/web-build.yml b/.github/workflows/web-build.yml
+new file mode 100644
+index 0000000..d52c89b
+--- /dev/null
++++ b/.github/workflows/web-build.yml
+@@ -0,0 +1,59 @@
++name: "web build"
++on:
++  workflow_dispatch:
++    inputs:
++      deploy_pages:
++        description: "Also deploy to GitHub Pages (Settings > Pages > Source must be 'GitHub Actions')"
++        type: boolean
++        default: false
++
++env:
++  GODOT_VERSION: "4.6-stable"
++
++jobs:
++  export:
++    runs-on: ubuntu-22.04
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          lfs: true
++      - name: Install Godot + export templates
++        run: |
++          BASE=https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}
++          wget -q ${BASE}/Godot_v${GODOT_VERSION}_linux.x86_64.zip
++          wget -q ${BASE}/Godot_v${GODOT_VERSION}_export_templates.tpz
++          unzip -q Godot_v${GODOT_VERSION}_linux.x86_64.zip
++          mv Godot_v${GODOT_VERSION}_linux.x86_64 /usr/local/bin/godot 2>/dev/null || sudo mv Godot_v${GODOT_VERSION}_linux.x86_64 /usr/local/bin/godot
++          TPL=~/.local/share/godot/export_templates/${GODOT_VERSION/-/.}
++          mkdir -p "$TPL"
++          unzip -q Godot_v${GODOT_VERSION}_export_templates.tpz -d tpl
++          mv tpl/templates/* "$TPL"/
++      - name: Import project
++        run: godot --headless --import || true
++      - name: Export Web
++        run: |
++          mkdir -p build/web
++          godot --headless --export-release "Web" build/web/index.html
++          ls -lh build/web
++      - uses: actions/upload-artifact@v4
++        with:
++          name: web
++          path: build/web
++      - uses: actions/upload-pages-artifact@v3
++        if: ${{ inputs.deploy_pages }}
++        with:
++          path: build/web
++
++  deploy:
++    if: ${{ inputs.deploy_pages }}
++    needs: export
++    runs-on: ubuntu-22.04
++    permissions:
++      pages: write
++      id-token: write
++    environment:
++      name: github-pages
++      url: ${{ steps.deployment.outputs.page_url }}
++    steps:
++      - id: deployment
++        uses: actions/deploy-pages@v4
+diff --git a/Scenes/Prefabs/Autoload/TouchControls.tscn b/Scenes/Prefabs/Autoload/TouchControls.tscn
+new file mode 100644
+index 0000000..6b90c8b
+--- /dev/null
++++ b/Scenes/Prefabs/Autoload/TouchControls.tscn
+@@ -0,0 +1,6 @@
++[gd_scene format=3]
++
++[ext_resource type="Script" path="res://Scripts/UI/TouchControls.gd" id="1_touch"]
++
++[node name="TouchControls" type="CanvasLayer"]
++script = ExtResource("1_touch")
+diff --git a/Scripts/Classes/Singletons/DiscordManager.gd b/Scripts/Classes/Singletons/DiscordManager.gd
+index f09eec5..238dd1f 100644
+--- a/Scripts/Classes/Singletons/DiscordManager.gd
++++ b/Scripts/Classes/Singletons/DiscordManager.gd
+@@ -1,6 +1,6 @@
+ extends Node
+ 
+-var enabled: bool = ProjectSettings.get_setting("application/use_discord", false) and not (OS.has_feature("linux") and OS.has_feature("arm64"))
++var enabled: bool = ProjectSettings.get_setting("application/use_discord", false) and not (OS.has_feature("linux") and OS.has_feature("arm64")) and not OS.has_feature("web")
+ var rpc = null
+ 
+ class DiscordRPCStub:
+diff --git a/Scripts/Classes/Singletons/Global.gd b/Scripts/Classes/Singletons/Global.gd
+index 25d0cb3..b20c7d3 100644
+--- a/Scripts/Classes/Singletons/Global.gd
++++ b/Scripts/Classes/Singletons/Global.gd
+@@ -258,6 +258,8 @@ func setup_config_dirs() -> void:
+ 	ModsTransfer.move_mods_to_new_path(ModsTransfer.find_mods_in_old_path())
+ 
+ func get_config_path() -> String:
++	if OS.has_feature("web"):
++		return "user://" # IndexedDB-backed; there is no executable directory
+ 	var exe_path := OS.get_executable_path()
+ 	var exe_dir  := exe_path.get_base_dir()
+ 	var portable_flag := exe_dir.path_join("portable.txt")
+@@ -290,12 +292,32 @@ func check_for_rom() -> void:
+ 			rom_path = path
+ 	if DirAccess.dir_exists_absolute(ROM_ASSETS_PATH):
+ 		var pack_json: String = FileAccess.get_file_as_string(ROM_ASSETS_PATH + "/pack_info.json")
+-		var pack_dict: Dictionary = JSON.parse_string(pack_json)
++		# pack_info.json is written last by the generator, so a missing/invalid
++		# file means generation was interrupted (e.g. the browser tab was killed).
++		var pack_var: Variant = JSON.parse_string(pack_json)
++		var pack_dict: Dictionary = pack_var if pack_var is Dictionary else {}
+ 		if pack_dict.get("version", -1) >= ROM_ASSETS_VERSION:
+ 			rom_assets_exist = true 
+ 		else:
+ 			ResourceGenerator.updating = true
+-			OS.move_to_trash(ROM_ASSETS_PATH)
++			trash_or_delete(ROM_ASSETS_PATH)
++
++## OS.move_to_trash() does nothing on Web (no trash), so delete outright there.
++func trash_or_delete(path: String) -> void:
++	if OS.has_feature("web"):
++		_delete_dir_recursive(path)
++	else:
++		OS.move_to_trash(path)
++
++func _delete_dir_recursive(path: String) -> void:
++	var dir := DirAccess.open(path)
++	if dir == null:
++		return
++	for sub_dir in dir.get_directories():
++		_delete_dir_recursive(path.path_join(sub_dir))
++	for file_name in dir.get_files():
++		dir.remove(file_name)
++	DirAccess.remove_absolute(path)
+ 
+ func _process(delta: float) -> void:
+ 	if multibind_action_just_pressed("debug_reload"):
+diff --git a/Scripts/UI/RomResourceGenerator.gd b/Scripts/UI/RomResourceGenerator.gd
+index 734efe5..0ccbd58 100644
+--- a/Scripts/UI/RomResourceGenerator.gd
++++ b/Scripts/UI/RomResourceGenerator.gd
+@@ -30,14 +30,6 @@ func done() -> void:
+ func generate_resource_pack() -> void:
+ 	DirAccess.make_dir_recursive_absolute(Global.ROM_ASSETS_PATH)
+ 	
+-	var pack_json: String = FileAccess.get_file_as_string("res://Resources/AssetRipper/ResourcePack/pack_info.json")
+-	var pack_dict: Dictionary = JSON.parse_string(pack_json)
+-	pack_dict.set("version", Global.ROM_ASSETS_VERSION)
+-	
+-	var pack_file := FileAccess.open(Global.ROM_ASSETS_PATH + "/pack_info.json", FileAccess.WRITE)
+-	pack_file.store_line(JSON.stringify(pack_dict))
+-	pack_file.close()
+-	
+ 	var list_json: String = FileAccess.get_file_as_string(SPRITE_LIST_PATH)
+ 	var list_dict: Dictionary = JSON.parse_string(list_json)
+ 	
+@@ -73,10 +65,21 @@ func generate_resource_pack() -> void:
+ 		error.show()
+ 		## uncomment this once the initial jsons are fully setup so that the game won't
+ 		## boot if the resource pack loading is borked
+-		OS.move_to_trash(Global.ROM_ASSETS_PATH)
++		Global.trash_or_delete(Global.ROM_ASSETS_PATH)
+ 	else:
++		write_pack_info()
+ 		done()
+ 
++## Written last: its presence marks a complete asset pack (see Global.check_for_rom).
++func write_pack_info() -> void:
++	var pack_json: String = FileAccess.get_file_as_string("res://Resources/AssetRipper/ResourcePack/pack_info.json")
++	var pack_dict: Dictionary = JSON.parse_string(pack_json)
++	pack_dict.set("version", Global.ROM_ASSETS_VERSION)
++	
++	var pack_file := FileAccess.open(Global.ROM_ASSETS_PATH + "/pack_info.json", FileAccess.WRITE)
++	pack_file.store_line(JSON.stringify(pack_dict))
++	pack_file.close()
++
+ func paste_sprite(sprite_image: Image, json_dict: Dictionary):
+ 	var columns: int = str_to_var(json_dict.get("columns", "4"))
+ 	var sheet_size: Vector2i = str_to_var(json_dict.get("sheet_size", "Vector2i(16, 16)"))
+diff --git a/Scripts/UI/RomVerifier.gd b/Scripts/UI/RomVerifier.gd
+index 359e252..7997662 100644
+--- a/Scripts/UI/RomVerifier.gd
++++ b/Scripts/UI/RomVerifier.gd
+@@ -8,12 +8,18 @@ const VALID_HASHES := [
+ 
+ var args: PackedStringArray
+ var rom_arg: String = ""
++var web_picker: WebRomPicker = null
+ @onready var file_dialog = $FileDialog
+ 
+ func _ready() -> void:
+ 	args = OS.get_cmdline_args()
+ 	Global.get_node("GameHUD").hide()
+ 
++	# Web: no filesystem, command line or drag-and-drop. Use a browser file input.
++	if OS.has_feature("web"):
++		setup_web_picker()
++		return
++
+ 	# Try command line ROMs first
+ 	for i in range(args.size()):
+ 		match args[i]:
+@@ -40,6 +46,43 @@ func _ready() -> void:
+ 	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+ 	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, false)
+ 
++func setup_web_picker() -> void:
++	web_picker = WebRomPicker.new()
++	web_picker.rom_loaded.connect(on_web_rom_loaded)
++	web_picker.rom_rejected.connect(on_web_rom_rejected)
++	web_picker.picker_cancelled.connect(file_prompt_closed)
++	%SelectRom.pressed.connect(web_picker.open_now)
++	var prompt: Label = %DefaultText.get_node("Label2")
++	prompt.text = "PLEASE PROVIDE A VANILLA ROM FILE FOR \"SUPER MARIO BROS.\" BY TAPPING BROWSE FILES AND PICKING THE ROM FROM YOUR FILES APP."
++	web_picker.start()
++
++func on_web_rom_loaded(file_name: String, data: PackedByteArray) -> void:
++	file_prompt_closed()
++	var ext := file_name.get_extension().to_lower()
++	if ext in ["zip", "7z", "rar", "tar", "gz", "gzip", "bz2"]:
++		zip_error()
++		return
++	if not is_valid_rom_bytes(data):
++		if ext in ["nes", "nez", "fds", "qd", "unf", "unif", "nsf", "nsfe"]:
++			error()
++		else:
++			extension_error()
++		return
++	# user:// is backed by IndexedDB on Web, so this persists between visits.
++	var file := FileAccess.open(Global.ROM_PATH, FileAccess.WRITE)
++	if file == null:
++		error()
++		return
++	file.store_buffer(data)
++	file.close()
++	web_picker.stop()
++	Global.rom_path = Global.ROM_PATH
++	verified()
++
++func on_web_rom_rejected(_reason: String) -> void:
++	file_prompt_closed()
++	extension_error()
++
+ func find_local_rom() -> String:
+ 	var exe_dir := OS.get_executable_path().get_base_dir()
+ 	var dir := DirAccess.open(exe_dir)
+@@ -85,10 +128,17 @@ static func get_hash(file_path: String) -> String:
+ 	var file := FileAccess.open(file_path, FileAccess.READ)
+ 	if not file:
+ 		return ""
+-	var file_bytes := file.get_buffer(40976)
+-	var data := file_bytes.slice(16)
++	return get_hash_from_bytes(file.get_buffer(40976))
++
++static func get_hash_from_bytes(rom_bytes: PackedByteArray) -> String:
++	if rom_bytes.size() <= 16:
++		return ""
++	var data := rom_bytes.slice(16, mini(rom_bytes.size(), 40976))
+ 	return Marshalls.raw_to_base64(data).sha256_text()
+ 
++static func is_valid_rom_bytes(rom_bytes: PackedByteArray) -> bool:
++	return get_hash_from_bytes(rom_bytes) in VALID_HASHES
++
+ static func is_valid_rom(rom_path := "") -> bool:
+ 	return get_hash(rom_path) in VALID_HASHES
+ 
+@@ -124,6 +174,8 @@ func verified() -> void:
+ 	Global.transition_to_scene(target_scene)
+ 
+ func _exit_tree() -> void:
++	if web_picker:
++		web_picker.stop()
+ 	Global.get_node("GameHUD").show()
+ 
+ func create_file_pointer(file_path: String) -> void:
+diff --git a/Scripts/UI/TouchControls.gd b/Scripts/UI/TouchControls.gd
+new file mode 100644
+index 0000000..78ce78f
+--- /dev/null
++++ b/Scripts/UI/TouchControls.gd
+@@ -0,0 +1,168 @@
++extends CanvasLayer
++## On-screen NES-style controls (D-pad, A, B, Select, Start) for touch devices.
++##
++## Autoloaded. Shown automatically on touch-capable Web / mobile builds, hidden
++## while a gamepad is connected or in use. Buttons are TouchScreenButtons whose
++## primary `action` is set natively; extra actions (e.g. ui_accept) are sent as
++## InputEventActions so menus and gameplay both work like the keyboard does.
++
++## Debug: force the controls on (e.g. desktop testing).
++@export var always_show := false
++
++const LAYER := 100
++
++var _root: Node2D
++var _buttons: Array[TouchButton] = []
++var _touch_seen := false
++var _gamepad_in_use := false
++
++
++class TouchButton extends TouchScreenButton:
++	const COLOR_FILL := Color(1, 1, 1, 0.20)
++	const COLOR_FILL_HELD := Color(1, 1, 1, 0.45)
++	const COLOR_EDGE := Color(1, 1, 1, 0.65)
++
++	var label := ""
++	var arrow := Vector2.ZERO
++	var round_shape := false
++	var button_size := Vector2.ZERO
++	var extra_actions: Array[StringName] = []
++	var _held := false
++
++	func _ready() -> void:
++		pressed.connect(_on_pressed)
++		released.connect(_on_released)
++
++	func _on_pressed() -> void:
++		_held = true
++		for a in extra_actions:
++			_send(a, true)
++		queue_redraw()
++
++	func _on_released() -> void:
++		_held = false
++		for a in extra_actions:
++			_send(a, false)
++		queue_redraw()
++
++	func release_all() -> void:
++		if _held:
++			_on_released()
++
++	static func _send(action: StringName, down: bool) -> void:
++		var ev := InputEventAction.new()
++		ev.action = action
++		ev.pressed = down
++		ev.strength = 1.0 if down else 0.0
++		Input.parse_input_event(ev)
++
++	func _draw() -> void:
++		var fill := COLOR_FILL_HELD if _held else COLOR_FILL
++		if round_shape:
++			var r := button_size.x * 0.5
++			draw_circle(Vector2.ZERO, r, fill)
++			draw_arc(Vector2.ZERO, r, 0.0, TAU, 28, COLOR_EDGE, 1.0)
++		else:
++			var rect := Rect2(-button_size * 0.5, button_size)
++			draw_rect(rect, fill)
++			draw_rect(rect, COLOR_EDGE, false, 1.0)
++		if arrow != Vector2.ZERO:
++			var side := arrow.orthogonal()
++			draw_colored_polygon(PackedVector2Array([
++				arrow * 6.0, -arrow * 4.0 + side * 6.0, -arrow * 4.0 - side * 6.0
++			]), COLOR_EDGE)
++		elif label != "":
++			var font := ThemeDB.fallback_font
++			var size := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 8)
++			draw_string(font, Vector2(-size.x * 0.5, size.y * 0.3), label,
++					HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(1, 1, 1, 0.9))
++
++
++func _ready() -> void:
++	layer = LAYER
++	process_mode = Node.PROCESS_MODE_ALWAYS # keep working while the game is paused
++	_root = Node2D.new()
++	add_child(_root)
++	_build_buttons()
++	Input.joy_connection_changed.connect(_on_joy_connection_changed)
++	_refresh()
++
++
++func _build_buttons() -> void:
++	# Coordinates are in the 256x240 game viewport.
++	var dpad := Vector2(40, 192)
++	_add(dpad + Vector2(0, -24), Vector2(24, 24), "", &"move_up_0", [&"ui_up"], true, Vector2.UP)
++	_add(dpad + Vector2(0, 24), Vector2(24, 24), "", &"move_down_0", [&"ui_down"], true, Vector2.DOWN)
++	_add(dpad + Vector2(-24, 0), Vector2(24, 24), "", &"move_left_0", [&"ui_left"], true, Vector2.LEFT)
++	_add(dpad + Vector2(24, 0), Vector2(24, 24), "", &"move_right_0", [&"ui_right"], true, Vector2.RIGHT)
++	# B = run / fire, A = jump (same pairs the keyboard binds to X and Z).
++	_add(Vector2(194, 208), Vector2(32, 32), "B", &"run_0", [&"action_0", &"ui_back"], false, Vector2.ZERO, true)
++	_add(Vector2(228, 194), Vector2(32, 32), "A", &"jump_0", [&"ui_accept"], false, Vector2.ZERO, true)
++	# Select = reserve item drop, Start = pause.
++	_add(Vector2(110, 226), Vector2(32, 14), "SEL", &"drop_item", [&"ui_select"])
++	_add(Vector2(146, 226), Vector2(32, 14), "START", &"pause", [])
++
++
++func _add(pos: Vector2, size: Vector2, label: String, action: StringName,
++		extras: Array[StringName], passby := false, arrow := Vector2.ZERO, round_shape := false) -> void:
++	var b := TouchButton.new()
++	b.position = pos
++	b.action = String(action)
++	b.passby_press = passby # lets the thumb slide between D-pad directions
++	b.visibility_mode = TouchScreenButton.VISIBILITY_ALWAYS
++	b.shape_visible = false
++	b.label = label
++	b.arrow = arrow
++	b.round_shape = round_shape
++	b.button_size = size
++	b.extra_actions = extras
++	if round_shape:
++		var circle := CircleShape2D.new()
++		circle.radius = size.x * 0.5
++		b.shape = circle
++	else:
++		var rect := RectangleShape2D.new()
++		rect.size = size
++		b.shape = rect
++	_root.add_child(b)
++	_buttons.append(b)
++
++
++func _input(event: InputEvent) -> void:
++	if event is InputEventScreenTouch or event is InputEventScreenDrag:
++		if not _touch_seen or _gamepad_in_use:
++			_touch_seen = true
++			_gamepad_in_use = false
++			_refresh()
++	elif (event is InputEventJoypadButton and event.pressed) \
++			or (event is InputEventJoypadMotion and absf(event.axis_value) > 0.6):
++		if not _gamepad_in_use:
++			_gamepad_in_use = true
++			_refresh()
++
++
++func _on_joy_connection_changed(_device: int, connected: bool) -> void:
++	if not connected:
++		_gamepad_in_use = false
++	_refresh()
++
++
++func _wants_controls() -> bool:
++	if always_show:
++		return true
++	if not (OS.has_feature("web") or OS.has_feature("mobile")):
++		return false
++	if not Input.get_connected_joypads().is_empty():
++		return false # Bluetooth / USB controller present
++	if _gamepad_in_use:
++		return false
++	return _touch_seen or DisplayServer.is_touchscreen_available()
++
++
++func _refresh() -> void:
++	var show_controls := _wants_controls()
++	if not show_controls:
++		for b in _buttons:
++			b.release_all()
++	_root.visible = show_controls
++	visible = show_controls
+diff --git a/Scripts/UI/WebRomPicker.gd b/Scripts/UI/WebRomPicker.gd
+new file mode 100644
+index 0000000..3eee48f
+--- /dev/null
++++ b/Scripts/UI/WebRomPicker.gd
+@@ -0,0 +1,107 @@
++class_name WebRomPicker
++extends RefCounted
++## Browser ROM picker for the Web export (iOS Safari friendly).
++##
++## iOS Safari only opens a file picker if input.click() runs inside the user's
++## tap handler. Godot's Button.pressed fires later (next engine frame), which
++## Safari rejects, so the hidden <input type="file"> is opened from a DOM-level
++## touchend/pointerup/click listener while the picker is "armed". The chosen
++## file is read in JS and handed to Godot as base64 through a JS callback.
++
++signal rom_loaded(file_name: String, data: PackedByteArray)
++signal rom_rejected(reason: String) ## "too_large" or "read_error"
++signal picker_cancelled
++
++const MAX_ROM_BYTES := 2 * 1024 * 1024
++
++const JS_SETUP := """
++(function () {
++	if (window.smbRomPicker) { return; }
++	var MAX = %d;
++	var input = document.createElement('input');
++	input.type = 'file';
++	input.accept = '.nes,application/octet-stream';
++	input.setAttribute('aria-hidden', 'true');
++	input.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
++	document.body.appendChild(input);
++
++	var picker = { armed: false, lastOpen: 0 };
++
++	function notify(kind, a, b) {
++		var cb = window.smbRomPickerCallback;
++		if (typeof cb === 'function') { cb(kind, a || '', b || ''); }
++	}
++
++	picker.open = function () {
++		var now = Date.now();
++		if (now - picker.lastOpen < 800) { return; }
++		picker.lastOpen = now;
++		input.click();
++	};
++	picker.arm = function () { picker.armed = true; };
++	picker.disarm = function () { picker.armed = false; };
++
++	input.addEventListener('change', function () {
++		var file = input.files && input.files[0];
++		if (!file) { notify('cancel'); return; }
++		if (file.size > MAX) { input.value = ''; notify('too_large', file.name); return; }
++		var reader = new FileReader();
++		reader.onerror = function () { notify('read_error', file.name); };
++		reader.onload = function () {
++			var bytes = new Uint8Array(reader.result);
++			var bin = '';
++			for (var i = 0; i < bytes.length; i += 0x8000) {
++				bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
++			}
++			input.value = '';
++			notify('file', file.name, btoa(bin));
++		};
++		reader.readAsArrayBuffer(file);
++	});
++	input.addEventListener('cancel', function () { notify('cancel'); });
++
++	['touchend', 'pointerup', 'click'].forEach(function (type) {
++		window.addEventListener(type, function () {
++			if (picker.armed) { picker.open(); }
++		}, true);
++	});
++	window.smbRomPicker = picker;
++})();
++""" % MAX_ROM_BYTES
++
++var _js_callback: JavaScriptObject = null
++
++
++func start() -> bool:
++	if not OS.has_feature("web"):
++		return false
++	JavaScriptBridge.eval(JS_SETUP, true)
++	_js_callback = JavaScriptBridge.create_callback(_on_js_event)
++	JavaScriptBridge.get_interface("window").smbRomPickerCallback = _js_callback
++	JavaScriptBridge.eval("window.smbRomPicker.arm();", true)
++	return true
++
++
++func stop() -> void:
++	if _js_callback == null:
++		return
++	JavaScriptBridge.eval("if (window.smbRomPicker) { window.smbRomPicker.disarm(); } window.smbRomPickerCallback = null;", true)
++	_js_callback = null
++
++
++## Fallback for browsers that allow opening the picker outside a DOM gesture
++## (desktop). On iOS the armed DOM listener does the real work.
++func open_now() -> void:
++	if OS.has_feature("web"):
++		JavaScriptBridge.eval("if (window.smbRomPicker) { window.smbRomPicker.open(); }", true)
++
++
++func _on_js_event(args: Array) -> void:
++	var kind := str(args[0]) if args.size() > 0 else ""
++	match kind:
++		"file":
++			rom_loaded.emit(str(args[1]), Marshalls.base64_to_raw(str(args[2])))
++		"too_large", "read_error":
++			rom_rejected.emit(kind)
++		"cancel":
++			picker_cancelled.emit()
+diff --git a/WEB_BUILD.md b/WEB_BUILD.md
+new file mode 100644
+index 0000000..7011b2a
+--- /dev/null
++++ b/WEB_BUILD.md
+@@ -0,0 +1,9 @@
++# Web (iOS Safari) build
++
++Build: run the **web build** workflow from the GitHub Actions tab (works from a phone). Download the `web` artifact, or tick *deploy_pages* to publish to GitHub Pages. Locally: `godot --headless --export-release "Web" build/web/index.html`.
++
++First launch: tap **BROWSE FILES...**, pick your vanilla SMB1 `.nes` from the Files app. The ROM and generated assets are stored in the browser's IndexedDB (`user://`); keep the site added to the Home Screen so iOS doesn't evict storage.
++
++Touch controls show automatically on touch devices and hide while a gamepad is connected or used. Set `always_show` on the `TouchControls` autoload to test on desktop.
++
++Notes: single-threaded export (no SharedArrayBuffer/COOP/COEP needed); GDExtensions (Discord RPC, godotgif) and mod loading are disabled on Web.
+diff --git a/addons/mod_loader/options/options.tres b/addons/mod_loader/options/options.tres
+index 56337be..5cce713 100644
+--- a/addons/mod_loader/options/options.tres
++++ b/addons/mod_loader/options/options.tres
+@@ -2,11 +2,13 @@
+ 
+ [ext_resource type="Resource" uid="uid://cshwxwy13cy1e" path="res://addons/mod_loader/options/profiles/default.tres" id="1_bgm30"]
+ [ext_resource type="Script" uid="uid://cmxtu4snlj1bb" path="res://addons/mod_loader/resources/options_current.gd" id="2"]
++[ext_resource type="Resource" path="res://addons/mod_loader/options/profiles/web.tres" id="4"]
+ [ext_resource type="Resource" uid="uid://covm7df0lupv3" path="res://addons/mod_loader/options/profiles/editor.tres" id="3"]
+ 
+ [resource]
+ script = ExtResource("2")
+ current_options = ExtResource("1_bgm30")
+ feature_override_options = {
+-"editor": ExtResource("3")
++"editor": ExtResource("3"),
++"web": ExtResource("4")
+ }
+diff --git a/addons/mod_loader/options/profiles/web.tres b/addons/mod_loader/options/profiles/web.tres
+new file mode 100644
+index 0000000..011c4b1
+--- /dev/null
++++ b/addons/mod_loader/options/profiles/web.tres
+@@ -0,0 +1,8 @@
++[gd_resource type="Resource" script_class="ModLoaderOptionsProfile" format=3]
++
++[ext_resource type="Script" uid="uid://dsbicisgihjet" path="res://addons/mod_loader/resources/options_profile.gd" id="1"]
++
++[resource]
++script = ExtResource("1")
++enable_mods = false
++ignore_deprecated_errors = true
+diff --git a/export_presets.cfg b/export_presets.cfg
+index 2d2877f..10f8ffd 100644
+--- a/export_presets.cfg
++++ b/export_presets.cfg
+@@ -122,3 +122,59 @@ rm -rf \"{temp_dir}\""
+ dotnet/include_scripts_content=false
+ dotnet/include_debug_symbols=true
+ dotnet/embed_build_outputs=false
++
++[preset.2]
++
++name="Web"
++platform="Web"
++runnable=true
++dedicated_server=false
++custom_features=""
++export_filter="all_resources"
++include_filter="*.bgm, *.mp3, *.txt, *.fnt"
++exclude_filter="*.dll, *.so, *.dylib, *.framework/*, godotgif/bin/*, addons/discord-rpc-gd/bin/*, Assets/LevelGuides/*, *.md"
++export_path="../Exports/Web/index.html"
++patches=PackedStringArray()
++patch_delta_encoding=false
++patch_delta_compression_level_zstd=19
++patch_delta_min_reduction=0.1
++patch_delta_include_filters="*"
++patch_delta_exclude_filters=""
++encryption_include_filters=""
++encryption_exclude_filters=""
++seed=0
++encrypt_pck=false
++encrypt_directory=false
++script_export_mode=0
++
++[preset.2.options]
++
++custom_template/debug=""
++custom_template/release=""
++variant/extensions_support=false
++variant/thread_support=false
++vram_texture_compression/for_desktop=true
++vram_texture_compression/for_mobile=true
++html/export_icon=true
++html/custom_html_shell=""
++html/head_include="<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">
++<meta name=\"mobile-web-app-capable\" content=\"yes\">
++<meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black\">
++<meta name=\"apple-mobile-web-app-title\" content=\"SMB1R\">
++<meta name=\"theme-color\" content=\"#000000\">
++<style>
++html, body { overscroll-behavior: none; background: #000; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
++canvas { touch-action: none; outline: none; }
++</style>"
++html/canvas_resize_policy=2
++html/focus_canvas_on_start=true
++html/experimental_virtual_keyboard=false
++progressive_web_app/enabled=false
++progressive_web_app/ensure_cross_origin_isolation_headers=false
++progressive_web_app/offline_page=""
++progressive_web_app/display=3
++progressive_web_app/orientation=1
++progressive_web_app/icon_144x144=""
++progressive_web_app/icon_180x180=""
++progressive_web_app/icon_512x512=""
++progressive_web_app/background_color=Color(0, 0, 0, 1)
+diff --git a/project.godot b/project.godot
+index 1560d04..d803cde 100644
+--- a/project.godot
++++ b/project.godot
+@@ -43,6 +43,7 @@ AudioManager="*res://Scenes/Prefabs/Autoload/AudioManager.tscn"
+ BetterTerrain="*res://addons/better-terrain/BetterTerrain.gd"
+ GameBanana="*res://Scripts/Classes/Singletons/GameBananaManager.gd"
+ SpeedrunHandler="*res://Scripts/Classes/Singletons/SpeedrunHandler.gd"
++TouchControls="*res://Scenes/Prefabs/Autoload/TouchControls.tscn"
+ 
+ [debug]
+ 

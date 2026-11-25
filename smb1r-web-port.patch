@@ -1,9 +1,9 @@
 diff --git a/.github/workflows/web-build.yml b/.github/workflows/web-build.yml
 new file mode 100644
-index 0000000..0da3a80
+index 0000000..4b2af3d
 --- /dev/null
 +++ b/.github/workflows/web-build.yml
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,63 @@
 +name: "web build"
 +on:
 +  workflow_dispatch:
@@ -36,6 +36,8 @@ index 0000000..0da3a80
 +          mkdir -p "$TPL"
 +          unzip -q Godot_v${GODOT_VERSION}_export_templates.tpz -d tpl
 +          mv tpl/templates/* "$TPL"/
++      - name: Show installed export templates
++        run: ls -R ~/.local/share/godot/export_templates | head -40
 +      - name: Import project
 +        run: godot --headless --import || true
 +      - name: Export Web
@@ -643,7 +645,7 @@ index 0000000..011c4b1
 +enable_mods = false
 +ignore_deprecated_errors = true
 diff --git a/export_presets.cfg b/export_presets.cfg
-index 2d2877f..10f8ffd 100644
+index 2d2877f..89ec2e7 100644
 --- a/export_presets.cfg
 +++ b/export_presets.cfg
 @@ -122,3 +122,59 @@ rm -rf \"{temp_dir}\""
@@ -682,7 +684,7 @@ index 2d2877f..10f8ffd 100644
 +variant/extensions_support=false
 +variant/thread_support=false
 +vram_texture_compression/for_desktop=true
-+vram_texture_compression/for_mobile=true
++vram_texture_compression/for_mobile=false
 +html/export_icon=true
 +html/custom_html_shell=""
 +html/head_include="<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">

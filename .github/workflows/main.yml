@@ -1,0 +1,63 @@
+name: "web build"
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_pages:
+        description: "Also deploy to GitHub Pages (Settings > Pages > Source must be 'GitHub Actions')"
+        type: boolean
+        default: false
+
+env:
+  GODOT_VERSION: "4.6-stable"
+
+jobs:
+  export:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Apply web port patch
+        run: |
+          git apply --3way --exclude='.github/*' smb1r-web-port.patch
+          git status --short
+      - name: Install Godot + export templates
+        run: |
+          BASE=https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}
+          wget -q ${BASE}/Godot_v${GODOT_VERSION}_linux.x86_64.zip
+          wget -q ${BASE}/Godot_v${GODOT_VERSION}_export_templates.tpz
+          unzip -q Godot_v${GODOT_VERSION}_linux.x86_64.zip
+          mv Godot_v${GODOT_VERSION}_linux.x86_64 /usr/local/bin/godot 2>/dev/null || sudo mv Godot_v${GODOT_VERSION}_linux.x86_64 /usr/local/bin/godot
+          TPL=~/.local/share/godot/export_templates/${GODOT_VERSION/-/.}
+          mkdir -p "$TPL"
+          unzip -q Godot_v${GODOT_VERSION}_export_templates.tpz -d tpl
+          mv tpl/templates/* "$TPL"/
+      - name: Import project
+        run: godot --headless --import || true
+      - name: Export Web
+        run: |
+          mkdir -p build/web
+          godot --headless --export-release "Web" build/web/index.html
+          ls -lh build/web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: build/web
+      - uses: actions/upload-pages-artifact@v3
+        if: ${{ inputs.deploy_pages }}
+        with:
+          path: build/web
+
+  deploy:
+    if: ${{ inputs.deploy_pages }}
+    needs: export
+    runs-on: ubuntu-22.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

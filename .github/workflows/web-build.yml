@@ -21,6 +21,8 @@ jobs:
         run: |
           git apply --3way --exclude='.github/*' smb1r-web-port.patch
           git status --short
+      - name: Remove native GDExtensions (unsupported on Web)
+        run: rm -f godotgif/godotgif.gdextension addons/discord-rpc-gd/bin/discord-rpc-gd.gdextension
       - name: Install Godot + export templates
         run: |
           BASE=https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}

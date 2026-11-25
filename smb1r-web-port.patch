@@ -91,11 +91,44 @@ index f09eec5..238dd1f 100644
  var rpc = null
  
  class DiscordRPCStub:
+diff --git a/Scripts/Classes/Singletons/GameBananaManager.gd b/Scripts/Classes/Singletons/GameBananaManager.gd
+index f05ba6c..ee1463e 100644
+--- a/Scripts/Classes/Singletons/GameBananaManager.gd
++++ b/Scripts/Classes/Singletons/GameBananaManager.gd
+@@ -15,6 +15,7 @@ var current_list := []
+ signal list_recieved
+ 
+ func _ready() -> void:
++	print("[smb1r] GameBananaManager ready")
+ 	add_child(http)
+ 	http.request_completed.connect(on_request_completed)
+ 
 diff --git a/Scripts/Classes/Singletons/Global.gd b/Scripts/Classes/Singletons/Global.gd
-index 25d0cb3..b20c7d3 100644
+index 25d0cb3..f46e909 100644
 --- a/Scripts/Classes/Singletons/Global.gd
 +++ b/Scripts/Classes/Singletons/Global.gd
-@@ -258,6 +258,8 @@ func setup_config_dirs() -> void:
+@@ -217,15 +217,20 @@ var unpressed_buttons: Dictionary[StringName, bool] = {}
+ 
+ 
+ func _ready() -> void:
++	print("[smb1r] Global ready: start")
+ 	if is_snapshot: 
+ 		get_build_time()
+ 		current_snapshot = get_snapshot_version()
+ 	current_version = get_version_number()
+ 	if OS.is_debug_build(): debug_mode = false
+ 	get_server_version()
++	print("[smb1r] Global: setup_config_dirs")
+ 	setup_config_dirs()
++	print("[smb1r] Global: check_for_rom")
+ 	check_for_rom()
++	print("[smb1r] Global: load_default_translations")
+ 	load_default_translations()
++	print("[smb1r] Global ready: done")
+ 	level_theme_changed.connect(load_default_translations)
+ 
+ func update_theme() -> void:
+@@ -258,6 +263,8 @@ func setup_config_dirs() -> void:
  	ModsTransfer.move_mods_to_new_path(ModsTransfer.find_mods_in_old_path())
  
  func get_config_path() -> String:
@@ -104,7 +137,7 @@ index 25d0cb3..b20c7d3 100644
  	var exe_path := OS.get_executable_path()
  	var exe_dir  := exe_path.get_base_dir()
  	var portable_flag := exe_dir.path_join("portable.txt")
-@@ -290,12 +292,32 @@ func check_for_rom() -> void:
+@@ -290,12 +297,32 @@ func check_for_rom() -> void:
  			rom_path = path
  	if DirAccess.dir_exists_absolute(ROM_ASSETS_PATH):
  		var pack_json: String = FileAccess.get_file_as_string(ROM_ASSETS_PATH + "/pack_info.json")
@@ -139,6 +172,42 @@ index 25d0cb3..b20c7d3 100644
  
  func _process(delta: float) -> void:
  	if multibind_action_just_pressed("debug_reload"):
+diff --git a/Scripts/Classes/Singletons/SaveManager.gd b/Scripts/Classes/Singletons/SaveManager.gd
+index 67cfc69..6ce52b7 100644
+--- a/Scripts/Classes/Singletons/SaveManager.gd
++++ b/Scripts/Classes/Singletons/SaveManager.gd
+@@ -49,6 +49,7 @@ const SAVE_TEMPLATE := {
+ 
+ 
+ func _ready() -> void:
++	print("[smb1r] SaveManager ready")
+ 	verify_saves()
+ 	load_achievements()
+ 
+diff --git a/Scripts/Classes/Singletons/SpeedrunHandler.gd b/Scripts/Classes/Singletons/SpeedrunHandler.gd
+index 93bcbc1..ef81088 100644
+--- a/Scripts/Classes/Singletons/SpeedrunHandler.gd
++++ b/Scripts/Classes/Singletons/SpeedrunHandler.gd
+@@ -156,6 +156,7 @@ const MEDAL_CONVERSIONS := [2, 1.5, 1]
+ enum Inputs{LEFT=1, RIGHT=2, UP=4, DOWN=8, RUN=16, JUMP=32, ACTION=64}
+ 
+ func _ready() -> void:
++	print("[smb1r] SpeedrunHandler ready")
+ 	process_mode = Node.PROCESS_MODE_ALWAYS
+ 
+ func _physics_process(delta: float) -> void:
+diff --git a/Scripts/Parts/Disclaimer.gd b/Scripts/Parts/Disclaimer.gd
+index 27894d2..11cfc17 100644
+--- a/Scripts/Parts/Disclaimer.gd
++++ b/Scripts/Parts/Disclaimer.gd
+@@ -11,6 +11,7 @@ func _enter_tree() -> void:
+ 			i.uppercase = true
+ 
+ func _ready() -> void:
++	print("[smb1r] Disclaimer scene ready")
+ 	var animation: Animation = $AnimationPlayer.get_animation_library("").get_animation(&"Go")
+ 	var track: int = animation.find_track("AudioStreamPlayer", Animation.TYPE_AUDIO)
+ 	for key in animation.track_get_key_count(track):
 diff --git a/Scripts/Parts/ResourcePackLoader.gd b/Scripts/Parts/ResourcePackLoader.gd
 index 10ea6d1..fd247a1 100644
 --- a/Scripts/Parts/ResourcePackLoader.gd
@@ -311,10 +380,10 @@ index 359e252..7997662 100644
  func create_file_pointer(file_path: String) -> void:
 diff --git a/Scripts/UI/TouchControls.gd b/Scripts/UI/TouchControls.gd
 new file mode 100644
-index 0000000..78ce78f
+index 0000000..68204c7
 --- /dev/null
 +++ b/Scripts/UI/TouchControls.gd
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,169 @@
 +extends CanvasLayer
 +## On-screen NES-style controls (D-pad, A, B, Select, Start) for touch devices.
 +##
@@ -396,6 +465,7 @@ index 0000000..78ce78f
 +
 +
 +func _ready() -> void:
++	print("[smb1r] TouchControls ready")
 +	layer = LAYER
 +	process_mode = Node.PROCESS_MODE_ALWAYS # keep working while the game is paused
 +	_root = Node2D.new()
@@ -611,39 +681,46 @@ index 0000000..7011b2a
 +Touch controls show automatically on touch devices and hide while a gamepad is connected or used. Set `always_show` on the `TouchControls` autoload to test on desktop.
 +
 +Notes: single-threaded export (no SharedArrayBuffer/COOP/COEP needed); GDExtensions (Discord RPC, godotgif) and mod loading are disabled on Web.
-diff --git a/addons/mod_loader/options/options.tres b/addons/mod_loader/options/options.tres
-index 56337be..5cce713 100644
---- a/addons/mod_loader/options/options.tres
-+++ b/addons/mod_loader/options/options.tres
-@@ -2,11 +2,13 @@
+diff --git a/addons/mod_loader/mod_loader.gd b/addons/mod_loader/mod_loader.gd
+index 5ce020f..cec8f48 100644
+--- a/addons/mod_loader/mod_loader.gd
++++ b/addons/mod_loader/mod_loader.gd
+@@ -32,6 +32,9 @@ const LOG_NAME := "ModLoader"
  
- [ext_resource type="Resource" uid="uid://cshwxwy13cy1e" path="res://addons/mod_loader/options/profiles/default.tres" id="1_bgm30"]
- [ext_resource type="Script" uid="uid://cmxtu4snlj1bb" path="res://addons/mod_loader/resources/options_current.gd" id="2"]
-+[ext_resource type="Resource" path="res://addons/mod_loader/options/profiles/web.tres" id="4"]
- [ext_resource type="Resource" uid="uid://covm7df0lupv3" path="res://addons/mod_loader/options/profiles/editor.tres" id="3"]
  
- [resource]
- script = ExtResource("2")
- current_options = ExtResource("1_bgm30")
- feature_override_options = {
--"editor": ExtResource("3")
-+"editor": ExtResource("3"),
-+"web": ExtResource("4")
- }
-diff --git a/addons/mod_loader/options/profiles/web.tres b/addons/mod_loader/options/profiles/web.tres
-new file mode 100644
-index 0000000..011c4b1
---- /dev/null
-+++ b/addons/mod_loader/options/profiles/web.tres
-@@ -0,0 +1,8 @@
-+[gd_resource type="Resource" script_class="ModLoaderOptionsProfile" format=3]
+ func _init() -> void:
++	if OS.has_feature("web"):
++		return # mods are unsupported on Web
 +
-+[ext_resource type="Script" uid="uid://dsbicisgihjet" path="res://addons/mod_loader/resources/options_profile.gd" id="1"]
-+
-+[resource]
-+script = ExtResource("1")
-+enable_mods = false
-+ignore_deprecated_errors = true
+ 	# if mods are not enabled - don't load mods
+ 	if ModLoaderStore.REQUIRE_CMD_LINE and not _ModLoaderCLI.is_running_with_command_line_arg("--enable-mods"):
+ 		return
+diff --git a/addons/mod_loader/mod_loader_store.gd b/addons/mod_loader/mod_loader_store.gd
+index c3640b4..e2d9c12 100644
+--- a/addons/mod_loader/mod_loader_store.gd
++++ b/addons/mod_loader/mod_loader_store.gd
+@@ -117,6 +117,12 @@ var has_feature := {
+ # =============================================================================
+ 
+ func _init():
++	# Mods are not supported on Web (no mods folder, and the log/cache file
++	# writes crash the iOS Safari build at startup), so stay inert there.
++	if OS.has_feature("web"):
++		ml_options = ModLoaderOptionsProfile.new()
++		ml_options.enable_mods = false
++		return
+ 	_update_ml_options_from_options_resource()
+ 	_update_ml_options_from_cli_args()
+ 	_configure_logger()
+@@ -125,6 +131,8 @@ func _init():
+ 
+ 
+ func _exit_tree() -> void:
++	if OS.has_feature("web"):
++		return
+ 	# Save the cache to the cache file.
+ 	_ModLoaderCache.save_to_file()
+ 
 diff --git a/export_presets.cfg b/export_presets.cfg
 index 2d2877f..4f2da10 100644
 --- a/export_presets.cfg

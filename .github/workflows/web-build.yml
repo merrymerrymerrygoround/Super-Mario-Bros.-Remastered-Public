@@ -34,6 +34,8 @@ jobs:
           mkdir -p "$TPL"
           unzip -q Godot_v${GODOT_VERSION}_export_templates.tpz -d tpl
           mv tpl/templates/* "$TPL"/
+      - name: Show installed export templates
+        run: ls -R ~/.local/share/godot/export_templates | head -40
       - name: Import project
         run: godot --headless --import || true
       - name: Export Web

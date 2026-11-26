@@ -10,34 +10,6 @@ index 0000000..6b90c8b
 +
 +[node name="TouchControls" type="CanvasLayer"]
 +script = ExtResource("1_touch")
-diff --git a/Scenes/Prefabs/Autoload/NewLevelBuilder.gd b/Scenes/Prefabs/Autoload/NewLevelBuilder.gd
-index efed5a0..3972323 100755
---- a/Scenes/Prefabs/Autoload/NewLevelBuilder.gd
-+++ b/Scenes/Prefabs/Autoload/NewLevelBuilder.gd
-@@ -2,7 +2,11 @@ extends Node
- 
- const base64_charset := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
- 
--const BASE_LEVEL_SCENE: PackedScene = preload("res://Scenes/Levels/CustomLevelBase.tscn")
-+## Loaded on first use, not preloaded: it drags in ~190 resources (tiles, level
-+## background, sounds) that are not needed until a custom level is built, and on
-+## Web that keeps memory down while the ROM picker is open.
-+const BASE_LEVEL_SCENE_PATH := "res://Scenes/Levels/CustomLevelBase.tscn"
-+var _base_level_scene: PackedScene = null
- var sub_level_file = null
- var level_file := {}
- 
-@@ -20,7 +24,9 @@ func load_level(temp_level_file := {}) -> void:
- 	building = false
- 
- func build_sublevel(level_idx := 0, temp_level_file := {}) -> PackedScene:
--	var level = BASE_LEVEL_SCENE.instantiate()
-+	if _base_level_scene == null:
-+		_base_level_scene = load(BASE_LEVEL_SCENE_PATH)
-+	var level = _base_level_scene.instantiate()
- 	level.sublevel_id = level_idx
- 	level.level_id = Global.level_num
- 	level.world_id = Global.world_num
 diff --git a/Scripts/Classes/Singletons/DiscordManager.gd b/Scripts/Classes/Singletons/DiscordManager.gd
 index f09eec5..238dd1f 100644
 --- a/Scripts/Classes/Singletons/DiscordManager.gd
@@ -406,12 +378,28 @@ index 359e252..7997662 100644
  	Global.get_node("GameHUD").show()
  
  func create_file_pointer(file_path: String) -> void:
+diff --git a/Scripts/UI/SettingsMenu.gd b/Scripts/UI/SettingsMenu.gd
+index f7f0259..8c1444a 100644
+--- a/Scripts/UI/SettingsMenu.gd
++++ b/Scripts/UI/SettingsMenu.gd
+@@ -18,6 +18,11 @@ static var physics_warning_shown := false
+ 
+ signal opened
+ 
++func _ready() -> void:
++	# Web / mobile: add the touch layout editor entry to the Video category.
++	if OS.has_feature("web") or OS.has_feature("mobile"):
++		TouchLayoutRow.install(self)
++
+ func _process(_delta: float) -> void:
+ 	category_select_active = current_container.selected_index == -1 and active
+ 	%Category.text = tr(current_container.category_name)
 diff --git a/Scripts/UI/TouchControls.gd b/Scripts/UI/TouchControls.gd
 new file mode 100644
-index 0000000..716031e
+index 0000000..d415f4a
 --- /dev/null
 +++ b/Scripts/UI/TouchControls.gd
-@@ -0,0 +1,339 @@
+@@ -0,0 +1,696 @@
 +extends CanvasLayer
 +## On-screen NES-style controls (D-pad, A, B, Select, Start, Run lock) for touch devices.
 +##
@@ -428,6 +416,11 @@ index 0000000..716031e
 +## Portrait: the page (see export_presets.cfg head_include) shows a "rotate your
 +## device" overlay and sets window.smbPortrait. While it is set the game is
 +## paused and muted, and the controls are released.
++##
++## Custom layout: Settings > Video > CUSTOMIZE TOUCH LAYOUT calls begin_layout_edit(),
++## a drag-and-drop editor where each control group (D-pad, A, B, LOCK, SELECT, START)
++## can be moved and resized. The result is saved to user://touch_layout.json as
++## fractions of the visible rect, so it survives window resizes and rotation.
 +
 +## Debug: force the controls on (e.g. desktop testing).
 +@export var always_show := false
@@ -444,6 +437,45 @@ index 0000000..716031e
 +const CLUSTER_WIDTH_UNITS := 154.0
 +const MAX_WIDTH_SHARE := 0.9
 +
++const LAYOUT_PATH := "user://touch_layout.json"
++const SCALE_MIN := 0.5
++const SCALE_MAX := 2.0
++const SCALE_STEP := 0.1
++const NO_POINTER := -999
++const MOUSE_POINTER := -2
++## Groups the player can move and resize. The D-pad moves as one piece.
++const GROUPS: Array[StringName] = [&"dpad", &"a", &"b", &"lock", &"select", &"start"]
++## Half the size of each group's bounding box, in base units (before scaling).
++const GROUP_HALF := {
++	&"dpad": Vector2(36, 36), &"a": Vector2(16, 16), &"b": Vector2(16, 16),
++	&"lock": Vector2(13, 13), &"select": Vector2(16, 7), &"start": Vector2(16, 7),
++}
++const GROUP_NAMES := {
++	&"dpad": "D-PAD", &"a": "A BUTTON", &"b": "B BUTTON",
++	&"lock": "LOCK", &"select": "SELECT", &"start": "START",
++}
++## What the editor draws for each group: [offset, size, round, label, arrow].
++const GROUP_PARTS := {
++	&"dpad": [
++		[Vector2(0, -24), Vector2(24, 24), false, "", Vector2.UP],
++		[Vector2(0, 24), Vector2(24, 24), false, "", Vector2.DOWN],
++		[Vector2(-24, 0), Vector2(24, 24), false, "", Vector2.LEFT],
++		[Vector2(24, 0), Vector2(24, 24), false, "", Vector2.RIGHT],
++	],
++	&"a": [[Vector2.ZERO, Vector2(32, 32), true, "A", Vector2.ZERO]],
++	&"b": [[Vector2.ZERO, Vector2(32, 32), true, "B", Vector2.ZERO]],
++	&"lock": [[Vector2.ZERO, Vector2(26, 26), true, "LOCK", Vector2.ZERO]],
++	&"select": [[Vector2.ZERO, Vector2(32, 14), false, "SEL", Vector2.ZERO]],
++	&"start": [[Vector2.ZERO, Vector2(32, 14), false, "START", Vector2.ZERO]],
++}
++## Editor toolbar: [id, label, width in base units].
++const TOOLS := [
++	[&"minus", "-", 20.0], [&"plus", "+", 20.0], [&"reset", "RESET", 44.0], [&"done", "DONE", 40.0],
++]
++const TOOL_HEIGHT := 16.0
++const TOOL_GAP := 4.0
++const TOOLBAR_WIDTH := 136.0
++
 +var _root: Node2D
 +var _buttons: Array[TouchButton] = []
 +var _by_id: Dictionary = {}
@@ -455,6 +487,16 @@ index 0000000..716031e
 +var _portrait_timer := 0.0
 +var _paused_by_portrait := false
 +var _muted_by_portrait := false
++
++## Saved layout: group name -> {"x": float, "y": float, "s": float}. x/y are the group
++## centre as fractions of the visible rect; s is the group's size multiplier.
++var _cfg := {}
++var _editing := false
++var _edit_sel: StringName = &""
++var _drag_pointer := NO_POINTER
++var _drag_grab := Vector2.ZERO
++var _edit_canvas: EditCanvas = null
++var _tool_rects := {}
 +
 +
 +class TouchButton extends TouchScreenButton:
@@ -534,12 +576,26 @@ index 0000000..716031e
 +					HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(1, 1, 1, 0.9))
 +
 +
++## Plain Node2D whose drawing is delegated to TouchControls (see _draw_editor).
++class EditCanvas extends Node2D:
++	var draw_cb := Callable()
++
++	func _draw() -> void:
++		if draw_cb.is_valid():
++			draw_cb.call(self)
++
++
 +func _ready() -> void:
 +	print("[smb1r] TouchControls ready")
 +	layer = LAYER
 +	process_mode = Node.PROCESS_MODE_ALWAYS # keep working while the game is paused
 +	_root = Node2D.new()
 +	add_child(_root)
++	_edit_canvas = EditCanvas.new()
++	_edit_canvas.draw_cb = _draw_editor
++	_edit_canvas.visible = false
++	add_child(_edit_canvas)
++	_load_layout()
 +	_build_buttons()
 +	_layout()
 +	Input.joy_connection_changed.connect(_on_joy_connection_changed)
@@ -642,20 +698,57 @@ index 0000000..716031e
 +	var o := vis.position
 +	var s := vis.size
 +	var k := _control_scale(s)
++	var defaults := _default_positions(o, s, k)
++	for g in GROUPS:
++		_place_group(g, _group_pos(g, o, s, k, defaults), k * _group_scale(g))
++	if _editing and _edit_canvas != null:
++		_edit_canvas.queue_redraw()
 +
-+	var dpad := o + Vector2(40.0, 0.0) * k + Vector2(0.0, s.y - 48.0 * k)
-+	var cell := 24.0 * k
-+	_place(&"up", dpad + Vector2(0, -cell), k)
-+	_place(&"down", dpad + Vector2(0, cell), k)
-+	_place(&"left", dpad + Vector2(-cell, 0), k)
-+	_place(&"right", dpad + Vector2(cell, 0), k)
 +
-+	_place(&"a", o + Vector2(s.x - 28.0 * k, s.y - 46.0 * k), k)
-+	_place(&"b", o + Vector2(s.x - 62.0 * k, s.y - 32.0 * k), k)
-+	_place(&"lock", o + Vector2(s.x - 62.0 * k, s.y - 68.0 * k), k)
++## Default centre of every group (the layout used until the player customizes it).
++func _default_positions(o: Vector2, s: Vector2, k: float) -> Dictionary:
++	return {
++		&"dpad": o + Vector2(40.0 * k, s.y - 48.0 * k),
++		&"a": o + Vector2(s.x - 28.0 * k, s.y - 46.0 * k),
++		&"b": o + Vector2(s.x - 62.0 * k, s.y - 32.0 * k),
++		&"lock": o + Vector2(s.x - 62.0 * k, s.y - 68.0 * k),
++		&"select": o + Vector2(s.x * 0.5 - 18.0 * k, s.y - 14.0 * k),
++		&"start": o + Vector2(s.x * 0.5 + 18.0 * k, s.y - 14.0 * k),
++	}
 +
-+	_place(&"select", o + Vector2(s.x * 0.5 - 18.0 * k, s.y - 14.0 * k), k)
-+	_place(&"start", o + Vector2(s.x * 0.5 + 18.0 * k, s.y - 14.0 * k), k)
++
++func _group_scale(g: StringName) -> float:
++	var c: Dictionary = _cfg.get(String(g), {})
++	return clampf(float(c.get("s", 1.0)), SCALE_MIN, SCALE_MAX)
++
++
++## Centre of a group: the saved position if there is one, else the default. A saved
++## entry is kept fully on screen, whatever the window shape or size multiplier.
++func _group_pos(g: StringName, o: Vector2, s: Vector2, k: float, defaults: Dictionary) -> Vector2:
++	var c: Dictionary = _cfg.get(String(g), {})
++	if c.is_empty():
++		return defaults[g]
++	var pos: Vector2 = defaults[g]
++	if c.has("x") and c.has("y"):
++		pos = o + Vector2(float(c["x"]) * s.x, float(c["y"]) * s.y)
++	return _clamp_group(g, pos, o, s, k * _group_scale(g))
++
++
++func _clamp_group(g: StringName, pos: Vector2, o: Vector2, s: Vector2, kk: float) -> Vector2:
++	var h: Vector2 = GROUP_HALF[g] * kk
++	return Vector2(clampf(pos.x, o.x + h.x, o.x + s.x - h.x),
++			clampf(pos.y, o.y + h.y, o.y + s.y - h.y))
++
++
++func _place_group(g: StringName, pos: Vector2, kk: float) -> void:
++	if g == &"dpad":
++		var cell := 24.0 * kk
++		_place(&"up", pos + Vector2(0, -cell), kk)
++		_place(&"down", pos + Vector2(0, cell), kk)
++		_place(&"left", pos + Vector2(-cell, 0), kk)
++		_place(&"right", pos + Vector2(cell, 0), kk)
++	else:
++		_place(g, pos, kk)
 +
 +
 +func _place(id: StringName, pos: Vector2, k: float) -> void:
@@ -711,6 +804,10 @@ index 0000000..716031e
 +# --- Visibility --------------------------------------------------------------
 +
 +func _input(event: InputEvent) -> void:
++	if _editing:
++		_edit_input(event)
++		get_viewport().set_input_as_handled()
++		return
 +	if event is InputEventScreenTouch or event is InputEventScreenDrag:
 +		if not _touch_seen or _gamepad_in_use:
 +			_touch_seen = true
@@ -744,6 +841,8 @@ index 0000000..716031e
 +
 +
 +func _refresh() -> void:
++	if _editing:
++		return # the layout editor owns visibility until it is closed
 +	var show_controls := _wants_controls()
 +	if not show_controls:
 +		for b in _buttons:
@@ -751,6 +850,278 @@ index 0000000..716031e
 +		_set_run_lock(false)
 +	_root.visible = show_controls
 +	visible = show_controls
++
++
++# --- Layout storage ----------------------------------------------------------
++
++func _load_layout() -> void:
++	_cfg = {}
++	if not FileAccess.file_exists(LAYOUT_PATH):
++		return
++	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(LAYOUT_PATH))
++	if not parsed is Dictionary:
++		return
++	for g in GROUPS:
++		var c: Variant = (parsed as Dictionary).get(String(g))
++		if not c is Dictionary:
++			continue
++		var clean := {}
++		for key in ["x", "y", "s"]:
++			if (c as Dictionary).has(key) and ((c as Dictionary)[key] is float or (c as Dictionary)[key] is int):
++				clean[key] = float((c as Dictionary)[key])
++		if not clean.is_empty():
++			_cfg[String(g)] = clean
++
++
++func _save_layout() -> void:
++	var f := FileAccess.open(LAYOUT_PATH, FileAccess.WRITE)
++	if f == null:
++		return
++	f.store_string(JSON.stringify(_cfg))
++	f.close()
++
++
++# --- Layout editor -----------------------------------------------------------
++
++## Opens the drag-and-drop layout editor (called from the settings menu).
++func begin_layout_edit() -> void:
++	if _editing:
++		return
++	_editing = true
++	_edit_sel = &""
++	_drag_pointer = NO_POINTER
++	for b in _buttons:
++		b.release_all()
++	_set_run_lock(false)
++	_root.visible = false # the real buttons must not fire while editing
++	visible = true
++	_edit_canvas.visible = true
++	_layout()
++	_edit_canvas.queue_redraw()
++
++
++func end_layout_edit() -> void:
++	if not _editing:
++		return
++	_editing = false
++	_drag_pointer = NO_POINTER
++	_edit_canvas.visible = false
++	_save_layout()
++	_layout()
++	_refresh()
++
++
++func _to_canvas(pos: Vector2) -> Vector2:
++	return _root.get_global_transform_with_canvas().affine_inverse() * pos
++
++
++func _edit_input(event: InputEvent) -> void:
++	if event is InputEventScreenTouch:
++		if event.pressed:
++			_edit_press(_to_canvas(event.position), event.index)
++		else:
++			_edit_release(event.index)
++	elif event is InputEventScreenDrag:
++		_edit_move(_to_canvas(event.position), event.index)
++	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT \
++			and event.device != InputEvent.DEVICE_ID_EMULATION:
++		# (Mouse events emulated from touches are skipped: the touch itself is handled.)
++		if event.pressed:
++			_edit_press(_to_canvas(event.position), MOUSE_POINTER)
++		else:
++			_edit_release(MOUSE_POINTER)
++	elif event is InputEventMouseMotion and event.device != InputEvent.DEVICE_ID_EMULATION:
++		_edit_move(_to_canvas(event.position), MOUSE_POINTER)
++
++
++func _current_group_pos(g: StringName) -> Vector2:
++	var vis := get_viewport().get_visible_rect()
++	var k := _control_scale(vis.size)
++	return _group_pos(g, vis.position, vis.size, k, _default_positions(vis.position, vis.size, k))
++
++
++func _group_at(p: Vector2) -> StringName:
++	var k := _control_scale(get_viewport().get_visible_rect().size)
++	var best: StringName = &""
++	var best_d := INF
++	for g in GROUPS:
++		var h: Vector2 = GROUP_HALF[g] * k * _group_scale(g)
++		var pos := _current_group_pos(g)
++		if absf(p.x - pos.x) <= h.x and absf(p.y - pos.y) <= h.y:
++			var d := p.distance_squared_to(pos)
++			if d < best_d:
++				best_d = d
++				best = g
++	return best
++
++
++func _edit_press(p: Vector2, pointer: int) -> void:
++	for id in _tool_rects:
++		if (_tool_rects[id] as Rect2).has_point(p):
++			_tool_pressed(id)
++			return
++	if _drag_pointer != NO_POINTER:
++		return
++	var hit := _group_at(p)
++	_edit_sel = hit
++	if hit != &"":
++		_drag_pointer = pointer
++		_drag_grab = _current_group_pos(hit) - p
++	_edit_canvas.queue_redraw()
++
++
++func _edit_move(p: Vector2, pointer: int) -> void:
++	if pointer != _drag_pointer or _edit_sel == &"":
++		return
++	var vis := get_viewport().get_visible_rect()
++	var k := _control_scale(vis.size)
++	var pos := _clamp_group(_edit_sel, p + _drag_grab, vis.position, vis.size, k * _group_scale(_edit_sel))
++	var c: Dictionary = _cfg.get(String(_edit_sel), {})
++	c["x"] = (pos.x - vis.position.x) / vis.size.x
++	c["y"] = (pos.y - vis.position.y) / vis.size.y
++	c["s"] = _group_scale(_edit_sel)
++	_cfg[String(_edit_sel)] = c
++	_layout()
++
++
++func _edit_release(pointer: int) -> void:
++	if pointer == _drag_pointer:
++		_drag_pointer = NO_POINTER
++		_save_layout()
++
++
++func _tool_pressed(id: StringName) -> void:
++	match id:
++		&"minus":
++			_bump_scale(-SCALE_STEP)
++		&"plus":
++			_bump_scale(SCALE_STEP)
++		&"reset":
++			_cfg.clear()
++			_edit_sel = &""
++			_save_layout()
++			_layout()
++		&"done":
++			end_layout_edit()
++
++
++## Resizes the selected group, or every group when nothing is selected.
++func _bump_scale(delta: float) -> void:
++	var targets: Array[StringName] = []
++	if _edit_sel != &"":
++		targets.append(_edit_sel)
++	else:
++		targets.assign(GROUPS)
++	for g in targets:
++		var c: Dictionary = _cfg.get(String(g), {})
++		c["s"] = snappedf(clampf(_group_scale(g) + delta, SCALE_MIN, SCALE_MAX), 0.05)
++		_cfg[String(g)] = c
++	_layout()
++	_save_layout()
++
++
++func _draw_text(ci: CanvasItem, text: String, center: Vector2, font_size: int, color: Color) -> void:
++	var font := ThemeDB.fallback_font
++	var size := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size)
++	ci.draw_string(font, Vector2(center.x - size.x * 0.5, center.y + size.y * 0.3), text,
++			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
++
++
++func _draw_editor(ci: CanvasItem) -> void:
++	var vis := get_viewport().get_visible_rect()
++	var o := vis.position
++	var s := vis.size
++	var k := _control_scale(s)
++	var defaults := _default_positions(o, s, k)
++	var ek := maxf(0.5, minf(k, s.x * 0.95 / TOOLBAR_WIDTH))
++	var text_size := maxi(6, roundi(8.0 * ek))
++	var white := Color(1, 1, 1, 0.9)
++	var gold := Color(1.0, 0.85, 0.2, 1.0)
++
++	ci.draw_rect(vis, Color(0, 0, 0, 0.78))
++
++	# Toolbar (top centre).
++	_tool_rects.clear()
++	var bar_w := TOOLBAR_WIDTH * ek
++	var x := o.x + (s.x - bar_w) * 0.5
++	var y := o.y + 6.0 * ek
++	for t in TOOLS:
++		var w: float = t[2] * ek
++		var rect := Rect2(x, y, w, TOOL_HEIGHT * ek)
++		_tool_rects[t[0]] = rect
++		ci.draw_rect(rect, Color(1, 1, 1, 0.22))
++		ci.draw_rect(rect, Color(1, 1, 1, 0.7), false, maxf(1.0, ek))
++		_draw_text(ci, t[1], rect.get_center(), text_size, white)
++		x += w + TOOL_GAP * ek
++
++	# Status + hint.
++	var status := "ALL BUTTONS"
++	if _edit_sel != &"":
++		status = "%s  %d%%" % [GROUP_NAMES[_edit_sel], roundi(_group_scale(_edit_sel) * 100.0)]
++	_draw_text(ci, status, Vector2(o.x + s.x * 0.5, y + (TOOL_HEIGHT + 10.0) * ek), text_size, gold)
++	var hint_y := o.y + s.y * 0.42
++	var hint_line := 11.0 * ek
++	var hints := ["DRAG A BUTTON TO MOVE IT", "TAP ONE, THEN + OR - TO RESIZE IT",
++			"TAP EMPTY SPACE TO RESIZE ALL"]
++	for i in hints.size():
++		_draw_text(ci, hints[i], Vector2(o.x + s.x * 0.5, hint_y + i * hint_line), text_size,
++				Color(1, 1, 1, 0.55))
++
++	# The controls themselves.
++	for g in GROUPS:
++		var kk := k * _group_scale(g)
++		var pos := _group_pos(g, o, s, k, defaults)
++		var picked := g == _edit_sel
++		var fill := Color(1.0, 0.85, 0.2, 0.45) if picked else Color(1, 1, 1, 0.22)
++		var edge := gold if picked else Color(1, 1, 1, 0.7)
++		var line := maxf(1.0, kk)
++		for part in GROUP_PARTS[g]:
++			var center: Vector2 = pos + (part[0] as Vector2) * kk
++			var size: Vector2 = (part[1] as Vector2) * kk
++			if part[2]:
++				ci.draw_circle(center, size.x * 0.5, fill)
++				ci.draw_arc(center, size.x * 0.5, 0.0, TAU, 32, edge, line)
++			else:
++				ci.draw_rect(Rect2(center - size * 0.5, size), fill)
++				ci.draw_rect(Rect2(center - size * 0.5, size), edge, false, line)
++			var arrow: Vector2 = part[4]
++			if arrow != Vector2.ZERO:
++				var side := arrow.orthogonal()
++				ci.draw_colored_polygon(PackedVector2Array([
++					center + arrow * 6.0 * kk,
++					center - arrow * 4.0 * kk + side * 6.0 * kk,
++					center - arrow * 4.0 * kk - side * 6.0 * kk]), edge)
++			elif part[3] != "":
++				_draw_text(ci, part[3], center, maxi(6, roundi(8.0 * kk)), white)
++		if picked:
++			var h: Vector2 = (GROUP_HALF[g] as Vector2) * kk
++			ci.draw_rect(Rect2(pos - h, h * 2.0), Color(gold, 0.6), false, 1.0)
+diff --git a/Scripts/UI/TouchLayoutRow.gd b/Scripts/UI/TouchLayoutRow.gd
+new file mode 100644
+index 0000000..fdc0142
+--- /dev/null
++++ b/Scripts/UI/TouchLayoutRow.gd
+@@ -0,0 +1,20 @@
++class_name TouchLayoutRow
++extends RefCounted
++## Adds CUSTOMIZE TOUCH LAYOUT to the settings menu's Video category (Web / mobile).
++## Pressing it opens TouchControls' drag-and-drop layout editor.
++
++const SELECTABLE_BUTTON = preload("res://Scenes/Parts/SelectableOptionButton.tscn")
++const VIDEO_PATH := "PanelContainer/MarginContainer/VBoxContainer/Video"
++
++
++static func install(menu: Control) -> void:
++	var video: Node = menu.get_node_or_null(VIDEO_PATH)
++	if video == null or not "options" in video:
++		return
++	var row = SELECTABLE_BUTTON.instantiate()
++	row.title = "CUSTOMIZE TOUCH LAYOUT"
++	video.add_child(row)
++	row.add_to_group("Options")
++	# Keep menu navigation order = visual order (the new row is last).
++	video.options.append(row)
++	row.button_pressed.connect(TouchControls.begin_layout_edit)
 diff --git a/Scripts/UI/WebImporter.gd b/Scripts/UI/WebImporter.gd
 new file mode 100644
 index 0000000..b1d8801
@@ -1096,7 +1467,7 @@ new file mode 100644
 index 0000000..c8efc72
 --- /dev/null
 +++ b/WEB_BUILD.md
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,31 @@
 +# Web (iOS Safari) build
 +
 +Build: run the **web build** workflow from the GitHub Actions tab (works from a phone). Download the `web` artifact, or tick *deploy_pages* to publish to GitHub Pages. Locally: `godot --headless --export-release "Web" build/web/index.html`.
@@ -1106,6 +1477,8 @@ index 0000000..c8efc72
 +## Touch controls
 +
 +Shown automatically on touch devices and hidden while a gamepad is connected or used. They are laid out from the real visible area, so they stay at the screen edges and keep a thumb-friendly size for every **Size** setting, window shape and per-level resolution. Set `always_show` on the `TouchControls` autoload to test on desktop.
++
++**Customize layout:** Settings → Video → **CUSTOMIZE TOUCH LAYOUT** opens an editor. Drag any control to move it, tap one and use **+ / -** to resize it (tap empty space first to resize them all), **RESET** restores the default, **DONE** saves. The layout is stored in the browser next to your save data.
 +
 +**LOCK** (above B) is the run lock ("shift lock"): tap once to hold run on, tap again to release. B still fires fireballs while locked.
 +
@@ -1203,7 +1576,7 @@ diff --git a/export_presets.cfg b/export_presets.cfg
 index 2d2877f..45d1cc9 100644
 --- a/export_presets.cfg
 +++ b/export_presets.cfg
-@@ -122,3 +122,236 @@ rm -rf \"{temp_dir}\""
+@@ -122,3 +122,250 @@ rm -rf \"{temp_dir}\""
  dotnet/include_scripts_content=false
  dotnet/include_debug_symbols=true
  dotnet/embed_build_outputs=false
@@ -1299,7 +1672,7 @@ index 2d2877f..45d1cc9 100644
 +#smb-msg { font-size: 11px; opacity: 0.85; margin-bottom: 14px; min-height: 18px; }
 +.smb-btn { position: relative; display: block; margin: 8px 0 0; padding: 14px 8px; background: #fff; color: #000; border-radius: 4px; overflow: hidden; cursor: pointer; }
 +.smb-btn.sec { background: #333; color: #fff; }
-+.smb-btn input { position: absolute; left: 0; top: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; font-size: 200px; }
++.smb-btn input { position: absolute; left: 0; top: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; font-size: 200px; }
 +</style>
 +<script>
 +(function () {
@@ -1356,6 +1729,20 @@ index 2d2877f..45d1cc9 100644
 +
 +    cancel.addEventListener('click', function () { hide(); notify('cancel'); });
 +    ok.addEventListener('click', function () { hide(); });
++    // Open the chooser from the tap itself (same trick as the ROM picker): a tap on the
++    // transparent file input is not reliable on touch browsers.
++    var lastOpen = 0;
++    function openPicker() {
++      var now = Date.now();
++      if (now - lastOpen < 800) { return; }
++      lastOpen = now;
++      try { fileIn.click(); } catch (e) {}
++    }
++    ['touchend', 'pointerup', 'click'].forEach(function (type) {
++      window.addEventListener(type, function (e) {
++        if (ov.style.display === 'flex' && pick.style.display !== 'none' && pick.contains(e.target)) { openPicker(); }
++      }, true);
++    });
 +    fileIn.addEventListener('cancel', function () { hide(); notify('cancel'); });
 +    fileIn.addEventListener('change', function () {
 +      var f = fileIn.files && fileIn.files[0];

@@ -35,7 +35,7 @@ index f05ba6c..ee1463e 100644
  	http.request_completed.connect(on_request_completed)
  
 diff --git a/Scripts/Classes/Singletons/Global.gd b/Scripts/Classes/Singletons/Global.gd
-index 25d0cb3..f46e909 100644
+index 25d0cb3..0fa8cde 100644
 --- a/Scripts/Classes/Singletons/Global.gd
 +++ b/Scripts/Classes/Singletons/Global.gd
 @@ -217,15 +217,20 @@ var unpressed_buttons: Dictionary[StringName, bool] = {}
@@ -64,17 +64,15 @@ index 25d0cb3..f46e909 100644
  
  func get_config_path() -> String:
 +	if OS.has_feature("web"):
-+		return "user://" # IndexedDB-backed; there is no executable directory
++		return "user://"
  	var exe_path := OS.get_executable_path()
  	var exe_dir  := exe_path.get_base_dir()
  	var portable_flag := exe_dir.path_join("portable.txt")
-@@ -290,12 +297,32 @@ func check_for_rom() -> void:
+@@ -290,12 +297,29 @@ func check_for_rom() -> void:
  			rom_path = path
  	if DirAccess.dir_exists_absolute(ROM_ASSETS_PATH):
  		var pack_json: String = FileAccess.get_file_as_string(ROM_ASSETS_PATH + "/pack_info.json")
 -		var pack_dict: Dictionary = JSON.parse_string(pack_json)
-+		# pack_info.json is written last by the generator, so a missing/invalid
-+		# file means generation was interrupted (e.g. the browser tab was killed).
 +		var pack_var: Variant = JSON.parse_string(pack_json)
 +		var pack_dict: Dictionary = pack_var if pack_var is Dictionary else {}
  		if pack_dict.get("version", -1) >= ROM_ASSETS_VERSION:
@@ -84,7 +82,6 @@ index 25d0cb3..f46e909 100644
 -			OS.move_to_trash(ROM_ASSETS_PATH)
 +			trash_or_delete(ROM_ASSETS_PATH)
 +
-+## OS.move_to_trash() does nothing on Web (no trash), so delete outright there.
 +func trash_or_delete(path: String) -> void:
 +	if OS.has_feature("web"):
 +		_delete_dir_recursive(path)
@@ -140,14 +137,13 @@ index 27894d2..11cfc17 100644
  	var track: int = animation.find_track("AudioStreamPlayer", Animation.TYPE_AUDIO)
  	for key in animation.track_get_key_count(track):
 diff --git a/Scripts/Parts/ResourcePackLoader.gd b/Scripts/Parts/ResourcePackLoader.gd
-index 10ea6d1..f940b50 100644
+index 10ea6d1..7b444da 100644
 --- a/Scripts/Parts/ResourcePackLoader.gd
 +++ b/Scripts/Parts/ResourcePackLoader.gd
-@@ -4,11 +4,20 @@ const RESOURCE_PACK_CONTAINER = preload("uid://lggi3b4310yl")
+@@ -4,11 +4,18 @@ const RESOURCE_PACK_CONTAINER = preload("uid://lggi3b4310yl")
  var resource_packs := []
  var containers := []
  
-+## Web only: browser file browser for AppData (see WebImporter).
 +var importer: WebImporter = null
 +
  
@@ -156,7 +152,6 @@ index 10ea6d1..f940b50 100644
 +	if OS.has_feature("web"):
 +		setup_web_import()
  
-+## Web has no file manager, so "open folder" opens the in-page file browser at AppData.
  func open_folder() -> void:
 +	if OS.has_feature("web"):
 +		importer.open("")
@@ -164,12 +159,10 @@ index 10ea6d1..f940b50 100644
  	OS.shell_show_in_file_manager(ProjectSettings.globalize_path(Global.config_path.path_join("resource_packs")), true)
  
  func get_resource_packs() -> void:
-@@ -24,6 +33,37 @@ func get_resource_packs() -> void:
+@@ -24,6 +31,32 @@ func get_resource_packs() -> void:
  		if FileAccess.file_exists(pack_info_path) and i != Global.ROM_PACK_NAME:
  			create_container(Global.config_path.path_join("resource_packs/" + i))
  
-+## Web: the section is just one "BROWSE APPDATA" row (the repurposed "open folder" row);
-+## the refresh and create-pack rows are dropped. The pack list below it stays.
 +func setup_web_import() -> void:
 +	importer = WebImporter.new()
 +	add_child(importer)
@@ -180,15 +173,12 @@ index 10ea6d1..f940b50 100644
 +	if open_row:
 +		open_row.title = "BROWSE APPDATA"
 +
-+	# Keep menu navigation in step: take the extra rows out of the options list first.
 +	for row_name in ["SelectableOptionNode2", "SelectableOptionNode3"]:
 +		var row = rows.get_node_or_null(row_name)
 +		if row:
 +			get_parent().options.erase(row)
 +			row.queue_free()
 +
-+## GifManager comes from the godotgif GDExtension, which doesn't exist on Web
-+## (or if the library fails to load), so look it up at runtime, not by name.
 +func load_gif_icon(path: String) -> Texture2D:
 +	var manager: Object = null
 +	if Engine.has_singleton("GifManager"):
@@ -202,7 +192,7 @@ index 10ea6d1..f940b50 100644
  func create_container(resource_pack := "") -> void:
  	var container = RESOURCE_PACK_CONTAINER.instantiate()
  	container.pack_json = JSONParser.parse_to_dict(resource_pack + "/pack_info.json")
-@@ -35,7 +75,7 @@ func create_container(resource_pack := "") -> void:
+@@ -35,7 +68,7 @@ func create_container(resource_pack := "") -> void:
  		image.load(resource_pack + "/icon.png")
  		container.icon = ImageTexture.create_from_image(image)
  	elif FileAccess.file_exists(resource_pack + "/icon.gif"):
@@ -212,7 +202,7 @@ index 10ea6d1..f940b50 100644
  	$"../ScrollContainer/VBoxContainer".add_child(container)
  	containers.append(container)
 diff --git a/Scripts/UI/RomResourceGenerator.gd b/Scripts/UI/RomResourceGenerator.gd
-index 734efe5..0ccbd58 100644
+index 734efe5..12e460d 100644
 --- a/Scripts/UI/RomResourceGenerator.gd
 +++ b/Scripts/UI/RomResourceGenerator.gd
 @@ -30,14 +30,6 @@ func done() -> void:
@@ -230,7 +220,7 @@ index 734efe5..0ccbd58 100644
  	var list_json: String = FileAccess.get_file_as_string(SPRITE_LIST_PATH)
  	var list_dict: Dictionary = JSON.parse_string(list_json)
  	
-@@ -73,10 +65,21 @@ func generate_resource_pack() -> void:
+@@ -73,10 +65,20 @@ func generate_resource_pack() -> void:
  		error.show()
  		## uncomment this once the initial jsons are fully setup so that the game won't
  		## boot if the resource pack loading is borked
@@ -240,7 +230,6 @@ index 734efe5..0ccbd58 100644
 +		write_pack_info()
  		done()
  
-+## Written last: its presence marks a complete asset pack (see Global.check_for_rom).
 +func write_pack_info() -> void:
 +	var pack_json: String = FileAccess.get_file_as_string("res://Resources/AssetRipper/ResourcePack/pack_info.json")
 +	var pack_dict: Dictionary = JSON.parse_string(pack_json)
@@ -254,10 +243,10 @@ index 734efe5..0ccbd58 100644
  	var columns: int = str_to_var(json_dict.get("columns", "4"))
  	var sheet_size: Vector2i = str_to_var(json_dict.get("sheet_size", "Vector2i(16, 16)"))
 diff --git a/Scripts/UI/RomVerifier.gd b/Scripts/UI/RomVerifier.gd
-index 359e252..7997662 100644
+index 359e252..13358b2 100644
 --- a/Scripts/UI/RomVerifier.gd
 +++ b/Scripts/UI/RomVerifier.gd
-@@ -8,12 +8,18 @@ const VALID_HASHES := [
+@@ -8,12 +8,17 @@ const VALID_HASHES := [
  
  var args: PackedStringArray
  var rom_arg: String = ""
@@ -268,7 +257,6 @@ index 359e252..7997662 100644
  	args = OS.get_cmdline_args()
  	Global.get_node("GameHUD").hide()
  
-+	# Web: no filesystem, command line or drag-and-drop. Use a browser file input.
 +	if OS.has_feature("web"):
 +		setup_web_picker()
 +		return
@@ -276,7 +264,7 @@ index 359e252..7997662 100644
  	# Try command line ROMs first
  	for i in range(args.size()):
  		match args[i]:
-@@ -40,6 +46,43 @@ func _ready() -> void:
+@@ -40,6 +45,45 @@ func _ready() -> void:
  	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
  	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, false)
  
@@ -287,7 +275,10 @@ index 359e252..7997662 100644
 +	web_picker.picker_cancelled.connect(file_prompt_closed)
 +	%SelectRom.pressed.connect(web_picker.open_now)
 +	var prompt: Label = %DefaultText.get_node("Label2")
-+	prompt.text = "PLEASE PROVIDE A VANILLA ROM FILE FOR \"SUPER MARIO BROS.\" BY TAPPING BROWSE FILES AND PICKING THE ROM FROM YOUR FILES APP."
++	if TouchControls.is_touch_device():
++		prompt.text = "PLEASE PROVIDE A VANILLA ROM FILE FOR \"SUPER MARIO BROS.\" BY TAPPING BROWSE FILES AND PICKING THE ROM FROM YOUR FILES APP."
++	else:
++		prompt.text = "PLEASE PROVIDE A VANILLA ROM FILE FOR \"SUPER MARIO BROS.\" BY CLICKING BROWSE FILES AND SELECTING THE ROM FROM YOUR COMPUTER."
 +	web_picker.start()
 +
 +func on_web_rom_loaded(file_name: String, data: PackedByteArray) -> void:
@@ -302,7 +293,6 @@ index 359e252..7997662 100644
 +		else:
 +			extension_error()
 +		return
-+	# user:// is backed by IndexedDB on Web, so this persists between visits.
 +	var file := FileAccess.open(Global.ROM_PATH, FileAccess.WRITE)
 +	if file == null:
 +		error()
@@ -320,7 +310,7 @@ index 359e252..7997662 100644
  func find_local_rom() -> String:
  	var exe_dir := OS.get_executable_path().get_base_dir()
  	var dir := DirAccess.open(exe_dir)
-@@ -85,10 +128,17 @@ static func get_hash(file_path: String) -> String:
+@@ -85,10 +129,17 @@ static func get_hash(file_path: String) -> String:
  	var file := FileAccess.open(file_path, FileAccess.READ)
  	if not file:
  		return ""
@@ -340,7 +330,7 @@ index 359e252..7997662 100644
  static func is_valid_rom(rom_path := "") -> bool:
  	return get_hash(rom_path) in VALID_HASHES
  
-@@ -124,6 +174,8 @@ func verified() -> void:
+@@ -124,6 +175,8 @@ func verified() -> void:
  	Global.transition_to_scene(target_scene)
  
  func _exit_tree() -> void:
@@ -350,16 +340,15 @@ index 359e252..7997662 100644
  
  func create_file_pointer(file_path: String) -> void:
 diff --git a/Scripts/UI/SettingsMenu.gd b/Scripts/UI/SettingsMenu.gd
-index f7f0259..8c1444a 100644
+index f7f0259..7c161bf 100644
 --- a/Scripts/UI/SettingsMenu.gd
 +++ b/Scripts/UI/SettingsMenu.gd
-@@ -18,6 +18,11 @@ static var physics_warning_shown := false
+@@ -18,6 +18,10 @@ static var physics_warning_shown := false
  
  signal opened
  
 +func _ready() -> void:
-+	# Web / mobile: add the touch layout editor entry to the Video category.
-+	if OS.has_feature("web") or OS.has_feature("mobile"):
++	if TouchControls.is_touch_device():
 +		TouchLayoutRow.install(self)
 +
  func _process(_delta: float) -> void:
@@ -367,44 +356,20 @@ index f7f0259..8c1444a 100644
  	%Category.text = tr(current_container.category_name)
 diff --git a/Scripts/UI/TouchControls.gd b/Scripts/UI/TouchControls.gd
 new file mode 100644
-index 0000000..d415f4a
+index 0000000..dcaaf90
 --- /dev/null
 +++ b/Scripts/UI/TouchControls.gd
-@@ -0,0 +1,696 @@
+@@ -0,0 +1,658 @@
 +extends CanvasLayer
-+## On-screen NES-style controls (D-pad, A, B, Select, Start, Run lock) for touch devices.
-+##
-+## Autoloaded. Shown automatically on touch-capable Web / mobile builds, hidden
-+## while a gamepad is connected or in use. Buttons are TouchScreenButtons whose
-+## primary `action` is set natively; extra actions (e.g. ui_accept) are sent as
-+## InputEventActions so menus and gameplay both work like the keyboard does.
-+##
-+## Layout: positions are recomputed from the *visible* viewport rect every time
-+## it changes (window resize, rotation, Size setting, per-level resolution
-+## enforcement), so the controls stay anchored to the real screen edges and keep
-+## a thumb-friendly size at any aspect ratio.
-+##
-+## Portrait: the page (see export_presets.cfg head_include) shows a "rotate your
-+## device" overlay and sets window.smbPortrait. While it is set the game is
-+## paused and muted, and the controls are released.
-+##
-+## Custom layout: Settings > Video > CUSTOMIZE TOUCH LAYOUT calls begin_layout_edit(),
-+## a drag-and-drop editor where each control group (D-pad, A, B, LOCK, SELECT, START)
-+## can be moved and resized. The result is saved to user://touch_layout.json as
-+## fractions of the visible rect, so it survives window resizes and rotation.
 +
-+## Debug: force the controls on (e.g. desktop testing).
 +@export var always_show := false
 +
 +const LAYER := 100
 +const PORTRAIT_POLL_SECONDS := 0.2
-+## Layout constants below were designed for a 256x240 viewport (1 unit = 1 px there).
 +const BASE_HEIGHT := 240.0
 +const BASE_BUTTON := 32.0
-+## Smallest comfortable thumb target, in CSS pixels, for a BASE_BUTTON-sized button.
 +const TARGET_BUTTON_CSS_PX := 56.0
 +const MAX_BOOST := 1.75
-+## dpad (cell edge to 2 cells out) + right cluster must fit within this share of the width.
 +const CLUSTER_WIDTH_UNITS := 154.0
 +const MAX_WIDTH_SHARE := 0.9
 +
@@ -414,9 +379,7 @@ index 0000000..d415f4a
 +const SCALE_STEP := 0.1
 +const NO_POINTER := -999
 +const MOUSE_POINTER := -2
-+## Groups the player can move and resize. The D-pad moves as one piece.
 +const GROUPS: Array[StringName] = [&"dpad", &"a", &"b", &"lock", &"select", &"start"]
-+## Half the size of each group's bounding box, in base units (before scaling).
 +const GROUP_HALF := {
 +	&"dpad": Vector2(36, 36), &"a": Vector2(16, 16), &"b": Vector2(16, 16),
 +	&"lock": Vector2(13, 13), &"select": Vector2(16, 7), &"start": Vector2(16, 7),
@@ -425,7 +388,6 @@ index 0000000..d415f4a
 +	&"dpad": "D-PAD", &"a": "A BUTTON", &"b": "B BUTTON",
 +	&"lock": "LOCK", &"select": "SELECT", &"start": "START",
 +}
-+## What the editor draws for each group: [offset, size, round, label, arrow].
 +const GROUP_PARTS := {
 +	&"dpad": [
 +		[Vector2(0, -24), Vector2(24, 24), false, "", Vector2.UP],
@@ -439,7 +401,6 @@ index 0000000..d415f4a
 +	&"select": [[Vector2.ZERO, Vector2(32, 14), false, "SEL", Vector2.ZERO]],
 +	&"start": [[Vector2.ZERO, Vector2(32, 14), false, "START", Vector2.ZERO]],
 +}
-+## Editor toolbar: [id, label, width in base units].
 +const TOOLS := [
 +	[&"minus", "-", 20.0], [&"plus", "+", 20.0], [&"reset", "RESET", 44.0], [&"done", "DONE", 40.0],
 +]
@@ -459,8 +420,6 @@ index 0000000..d415f4a
 +var _paused_by_portrait := false
 +var _muted_by_portrait := false
 +
-+## Saved layout: group name -> {"x": float, "y": float, "s": float}. x/y are the group
-+## centre as fractions of the visible rect; s is the group's size multiplier.
 +var _cfg := {}
 +var _editing := false
 +var _edit_sel: StringName = &""
@@ -483,10 +442,8 @@ index 0000000..d415f4a
 +	var round_shape := false
 +	var button_size := Vector2.ZERO
 +	var extra_actions: Array[StringName] = []
-+	## Press-and-latch button (used by the run lock). Has no native action.
 +	var toggle := false
 +	var latched := false
-+	## Extra actions in `keep_actions` are not released while keep_pressed returns true.
 +	var keep_actions: Array[StringName] = []
 +	var keep_pressed := Callable()
 +	var _held := false
@@ -547,7 +504,6 @@ index 0000000..d415f4a
 +					HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(1, 1, 1, 0.9))
 +
 +
-+## Plain Node2D whose drawing is delegated to TouchControls (see _draw_editor).
 +class EditCanvas extends Node2D:
 +	var draw_cb := Callable()
 +
@@ -559,7 +515,7 @@ index 0000000..d415f4a
 +func _ready() -> void:
 +	print("[smb1r] TouchControls ready")
 +	layer = LAYER
-+	process_mode = Node.PROCESS_MODE_ALWAYS # keep working while the game is paused
++	process_mode = Node.PROCESS_MODE_ALWAYS
 +	_root = Node2D.new()
 +	add_child(_root)
 +	_edit_canvas = EditCanvas.new()
@@ -583,19 +539,13 @@ index 0000000..d415f4a
 +
 +
 +func _build_buttons() -> void:
-+	# Shapes are in base units (designed for 256x240); _layout() positions and
-+	# scales the nodes, which scales their hit shapes with them.
 +	_add(&"up", Vector2(24, 24), "", &"move_up_0", [&"ui_up"], true, Vector2.UP)
 +	_add(&"down", Vector2(24, 24), "", &"move_down_0", [&"ui_down"], true, Vector2.DOWN)
 +	_add(&"left", Vector2(24, 24), "", &"move_left_0", [&"ui_left"], true, Vector2.LEFT)
 +	_add(&"right", Vector2(24, 24), "", &"move_right_0", [&"ui_right"], true, Vector2.RIGHT)
-+	# B = run / fire, A = jump (same pairs the keyboard binds to X and Z). B's native
-+	# action is fire; run is sent as an extra so the run lock can keep it held.
 +	_add(&"b", Vector2(32, 32), "B", &"action_0", [&"run_0", &"ui_back"], false, Vector2.ZERO, true)
 +	_add(&"a", Vector2(32, 32), "A", &"jump_0", [&"ui_accept"], false, Vector2.ZERO, true)
-+	# Run lock ("shift lock"): tap to hold run on, tap again to release.
 +	_add(&"lock", Vector2(26, 26), "LOCK", &"", [], false, Vector2.ZERO, true)
-+	# Select = reserve item drop, Start = pause.
 +	_add(&"select", Vector2(32, 14), "SEL", &"drop_item", [&"ui_select"])
 +	_add(&"start", Vector2(32, 14), "START", &"pause", [])
 +
@@ -611,7 +561,7 @@ index 0000000..d415f4a
 +		extras: Array[StringName], passby := false, arrow := Vector2.ZERO, round_shape := false) -> void:
 +	var b := TouchButton.new()
 +	b.action = String(action)
-+	b.passby_press = passby # lets the thumb slide between D-pad directions
++	b.passby_press = passby
 +	b.visibility_mode = TouchScreenButton.VISIBILITY_ALWAYS
 +	b.shape_visible = false
 +	b.label = label
@@ -632,8 +582,6 @@ index 0000000..d415f4a
 +	_by_id[id] = b
 +
 +
-+# --- Layout ------------------------------------------------------------------
-+
 +func _layout_signature() -> Vector4:
 +	var vis := get_viewport().get_visible_rect().size
 +	var win := Vector2(DisplayServer.window_get_size())
@@ -646,20 +594,17 @@ index 0000000..d415f4a
 +		_layout()
 +
 +
-+## Scale factor applied to the base (256x240) layout.
 +func _control_scale(vis_size: Vector2) -> float:
-+	var u := vis_size.y / BASE_HEIGHT # keep proportions if the logical height isn't 240
++	var u := vis_size.y / BASE_HEIGHT
 +	var win := Vector2(DisplayServer.window_get_size())
 +	var boost := 1.0
 +	if win.x > 0.0 and win.y > 0.0 and vis_size.x > 0.0 and vis_size.y > 0.0:
-+		# Physical pixels per viewport unit (letterboxed, so the smaller axis wins).
 +		var px_per_unit := minf(win.x / vis_size.x, win.y / vis_size.y)
 +		var dpr := maxf(1.0, DisplayServer.screen_get_scale())
 +		var css_per_unit := px_per_unit / dpr
 +		if css_per_unit > 0.0:
 +			boost = clampf(TARGET_BUTTON_CSS_PX / (BASE_BUTTON * u * css_per_unit), 1.0, MAX_BOOST)
 +	var k := u * boost
-+	# Never let the two clusters collide on narrow views.
 +	return minf(k, MAX_WIDTH_SHARE * vis_size.x / CLUSTER_WIDTH_UNITS)
 +
 +
@@ -676,7 +621,6 @@ index 0000000..d415f4a
 +		_edit_canvas.queue_redraw()
 +
 +
-+## Default centre of every group (the layout used until the player customizes it).
 +func _default_positions(o: Vector2, s: Vector2, k: float) -> Dictionary:
 +	return {
 +		&"dpad": o + Vector2(40.0 * k, s.y - 48.0 * k),
@@ -693,8 +637,6 @@ index 0000000..d415f4a
 +	return clampf(float(c.get("s", 1.0)), SCALE_MIN, SCALE_MAX)
 +
 +
-+## Centre of a group: the saved position if there is one, else the default. A saved
-+## entry is kept fully on screen, whatever the window shape or size multiplier.
 +func _group_pos(g: StringName, o: Vector2, s: Vector2, k: float, defaults: Dictionary) -> Vector2:
 +	var c: Dictionary = _cfg.get(String(g), {})
 +	if c.is_empty():
@@ -728,8 +670,6 @@ index 0000000..d415f4a
 +	b.scale = Vector2(k, k)
 +
 +
-+# --- Run lock ----------------------------------------------------------------
-+
 +func _set_run_lock(on: bool) -> void:
 +	if _run_lock == on:
 +		return
@@ -741,8 +681,6 @@ index 0000000..d415f4a
 +	var b: TouchButton = _by_id[&"b"]
 +	TouchButton._send(&"run_0", on or b._held)
 +
-+
-+# --- Portrait ----------------------------------------------------------------
 +
 +func _page_is_portrait() -> bool:
 +	var v: Variant = JavaScriptBridge.eval("window.smbPortrait === true", true)
@@ -772,8 +710,6 @@ index 0000000..d415f4a
 +	_refresh()
 +
 +
-+# --- Visibility --------------------------------------------------------------
-+
 +func _input(event: InputEvent) -> void:
 +	if _editing:
 +		_edit_input(event)
@@ -784,6 +720,9 @@ index 0000000..d415f4a
 +			_touch_seen = true
 +			_gamepad_in_use = false
 +			_refresh()
++	elif _touch_seen and not always_show and not _touch_expected() and _is_pc_input(event):
++		_touch_seen = false
++		_refresh()
 +	elif (event is InputEventJoypadButton and event.pressed) \
 +			or (event is InputEventJoypadMotion and absf(event.axis_value) > 0.6):
 +		if not _gamepad_in_use:
@@ -797,6 +736,28 @@ index 0000000..d415f4a
 +	_refresh()
 +
 +
++func _is_pc_input(event: InputEvent) -> bool:
++	if event is InputEventKey:
++		return event.pressed
++	if event is InputEventMouseButton:
++		return event.pressed and event.device != InputEvent.DEVICE_ID_EMULATION
++	return false
++
++
++func _touch_expected() -> bool:
++	if OS.has_feature("web"):
++		return JavaScriptBridge.eval("window.smbTouchDevice === true", true) == true
++	return DisplayServer.is_touchscreen_available()
++
++
++func is_touch_device() -> bool:
++	if always_show:
++		return true
++	if not (OS.has_feature("web") or OS.has_feature("mobile")):
++		return false
++	return _touch_seen or _touch_expected()
++
++
 +func _wants_controls() -> bool:
 +	if _portrait:
 +		return false
@@ -805,15 +766,15 @@ index 0000000..d415f4a
 +	if not (OS.has_feature("web") or OS.has_feature("mobile")):
 +		return false
 +	if not Input.get_connected_joypads().is_empty():
-+		return false # Bluetooth / USB controller present
++		return false
 +	if _gamepad_in_use:
 +		return false
-+	return _touch_seen or DisplayServer.is_touchscreen_available()
++	return is_touch_device()
 +
 +
 +func _refresh() -> void:
 +	if _editing:
-+		return # the layout editor owns visibility until it is closed
++		return
 +	var show_controls := _wants_controls()
 +	if not show_controls:
 +		for b in _buttons:
@@ -822,8 +783,6 @@ index 0000000..d415f4a
 +	_root.visible = show_controls
 +	visible = show_controls
 +
-+
-+# --- Layout storage ----------------------------------------------------------
 +
 +func _load_layout() -> void:
 +	_cfg = {}
@@ -852,9 +811,6 @@ index 0000000..d415f4a
 +	f.close()
 +
 +
-+# --- Layout editor -----------------------------------------------------------
-+
-+## Opens the drag-and-drop layout editor (called from the settings menu).
 +func begin_layout_edit() -> void:
 +	if _editing:
 +		return
@@ -864,7 +820,7 @@ index 0000000..d415f4a
 +	for b in _buttons:
 +		b.release_all()
 +	_set_run_lock(false)
-+	_root.visible = false # the real buttons must not fire while editing
++	_root.visible = false
 +	visible = true
 +	_edit_canvas.visible = true
 +	_layout()
@@ -896,7 +852,6 @@ index 0000000..d415f4a
 +		_edit_move(_to_canvas(event.position), event.index)
 +	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT \
 +			and event.device != InputEvent.DEVICE_ID_EMULATION:
-+		# (Mouse events emulated from touches are skipped: the touch itself is handled.)
 +		if event.pressed:
 +			_edit_press(_to_canvas(event.position), MOUSE_POINTER)
 +		else:
@@ -976,7 +931,6 @@ index 0000000..d415f4a
 +			end_layout_edit()
 +
 +
-+## Resizes the selected group, or every group when nothing is selected.
 +func _bump_scale(delta: float) -> void:
 +	var targets: Array[StringName] = []
 +	if _edit_sel != &"":
@@ -1011,7 +965,6 @@ index 0000000..d415f4a
 +
 +	ci.draw_rect(vis, Color(0, 0, 0, 0.78))
 +
-+	# Toolbar (top centre).
 +	_tool_rects.clear()
 +	var bar_w := TOOLBAR_WIDTH * ek
 +	var x := o.x + (s.x - bar_w) * 0.5
@@ -1025,7 +978,6 @@ index 0000000..d415f4a
 +		_draw_text(ci, t[1], rect.get_center(), text_size, white)
 +		x += w + TOOL_GAP * ek
 +
-+	# Status + hint.
 +	var status := "ALL BUTTONS"
 +	if _edit_sel != &"":
 +		status = "%s  %d%%" % [GROUP_NAMES[_edit_sel], roundi(_group_scale(_edit_sel) * 100.0)]
@@ -1038,7 +990,6 @@ index 0000000..d415f4a
 +		_draw_text(ci, hints[i], Vector2(o.x + s.x * 0.5, hint_y + i * hint_line), text_size,
 +				Color(1, 1, 1, 0.55))
 +
-+	# The controls themselves.
 +	for g in GROUPS:
 +		var kk := k * _group_scale(g)
 +		var pos := _group_pos(g, o, s, k, defaults)
@@ -1069,14 +1020,12 @@ index 0000000..d415f4a
 +			ci.draw_rect(Rect2(pos - h, h * 2.0), Color(gold, 0.6), false, 1.0)
 diff --git a/Scripts/UI/TouchLayoutRow.gd b/Scripts/UI/TouchLayoutRow.gd
 new file mode 100644
-index 0000000..fdc0142
+index 0000000..03ee33a
 --- /dev/null
 +++ b/Scripts/UI/TouchLayoutRow.gd
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,17 @@
 +class_name TouchLayoutRow
 +extends RefCounted
-+## Adds CUSTOMIZE TOUCH LAYOUT to the settings menu's Video category (Web / mobile).
-+## Pressing it opens TouchControls' drag-and-drop layout editor.
 +
 +const SELECTABLE_BUTTON = preload("res://Scenes/Parts/SelectableOptionButton.tscn")
 +const VIDEO_PATH := "PanelContainer/MarginContainer/VBoxContainer/Video"
@@ -1090,43 +1039,20 @@ index 0000000..fdc0142
 +	row.title = "CUSTOMIZE TOUCH LAYOUT"
 +	video.add_child(row)
 +	row.add_to_group("Options")
-+	# Keep menu navigation order = visual order (the new row is last).
 +	video.options.append(row)
 +	row.button_pressed.connect(TouchControls.begin_layout_edit)
 diff --git a/Scripts/UI/WebImporter.gd b/Scripts/UI/WebImporter.gd
 new file mode 100644
-index 0000000..f83e70a
+index 0000000..a73424b
 --- /dev/null
 +++ b/Scripts/UI/WebImporter.gd
-@@ -0,0 +1,363 @@
+@@ -0,0 +1,322 @@
 +class_name WebImporter
 +extends Node
-+## File browser for resource packs, mods and custom characters (Web export only).
-+##
-+## The page (export_presets.cfg head_include) provides window.smbImporter: a modal file
-+## browser drawn in HTML on top of the game (path bar, Refresh, Import file..., and an
-+## actions menu per item). Godot owns the files; the page only asks for things through
-+## window.smbImportCallback, and Godot answers by calling back into window.smbImporter:
-+##   "list"   (dir)             -> setListing: show a folder
-+##   "file"   (dir, name, size) -> import the picked .zip into that folder
-+##   "delete" (dir, name)       -> delete an item
-+##   "close"                    -> the player left the browser
-+##
-+## It is HTML (not Godot controls) because iOS Safari only opens a file chooser from a
-+## genuine tap on the page, never from a Godot Button press.
-+##
-+## Folders: "" (the root, AppData, listing the three below), "mods" (zips kept in
-+## user://mods), "resource_packs" (one folder per pack) and "custom_characters" (one folder
-+## per character). Mods load at startup, so any mod change reloads the page when the
-+## player leaves the browser. Characters are read each time the character select opens.
-+##
-+## A picked file stays in the page. We pull it across in base64 chunks (so big zips never
-+## need one giant string), write it to a temp file in user://, then install it.
 +
 +signal packs_changed
 +
 +const MAX_BYTES := 96 * 1024 * 1024
-+## Must match CH in the page script, and be a multiple of 3 so each chunk is clean base64.
 +const CHUNK_BYTES := 393216
 +const TMP_PATH := "user://import_tmp.zip"
 +const MODS_DIR := "user://mods"
@@ -1134,11 +1060,9 @@ index 0000000..f83e70a
 +
 +var _callback: JavaScriptObject = null
 +var _busy := false
-+## Milliseconds to wait before reloading when the browser closes (0 = no reload needed).
 +var _reload_ms := 0
 +
 +
-+## dir: "" (root), "mods", "resource_packs" or "custom_characters"
 +func open(dir := "") -> void:
 +	if not OS.has_feature("web") or _busy:
 +		return
@@ -1151,7 +1075,6 @@ index 0000000..f83e70a
 +		JSON.stringify(shown), JSON.stringify(_listing(shown)), MAX_BYTES], true)
 +
 +
-+## Deletes every imported mod and reloads the page (recovery if a mod misbehaves).
 +func remove_all_mods() -> void:
 +	if not OS.has_feature("web"):
 +		return
@@ -1190,8 +1113,6 @@ index 0000000..f83e70a
 +			_play("bump")
 +
 +
-+# --- Listing -----------------------------------------------------------------
-+
 +func _packs_dir() -> String:
 +	return Global.config_path.path_join("resource_packs")
 +
@@ -1200,7 +1121,6 @@ index 0000000..f83e70a
 +	return Global.config_path.path_join("custom_characters")
 +
 +
-+## Items for the page: {"n": name, "t": "dir" | "zip" | "pack" | "char", "s": size in bytes}.
 +func _listing(dir: String) -> Array:
 +	var items := []
 +	match dir:
@@ -1217,7 +1137,7 @@ index 0000000..f83e70a
 +			var dirs := DirAccess.get_directories_at(_packs_dir())
 +			dirs.sort()
 +			for d in dirs:
-+				if d != Global.ROM_PACK_NAME: # the generated base assets are not a user pack
++				if d != Global.ROM_PACK_NAME:
 +					items.append({"n": d, "t": "pack", "s": _dir_size(_packs_dir().path_join(d))})
 +		"custom_characters":
 +			var chars := DirAccess.get_directories_at(_chars_dir())
@@ -1250,8 +1170,6 @@ index 0000000..f83e70a
 +		JSON.stringify(dir), JSON.stringify(_listing(dir)), JSON.stringify(message),
 +		"true" if ok else "false"], true)
 +
-+
-+# --- Import ------------------------------------------------------------------
 +
 +func _receive(dir: String, file_name: String, size: int) -> void:
 +	if not dir in ROOT_DIRS:
@@ -1291,7 +1209,6 @@ index 0000000..f83e70a
 +
 +	var ok: bool = result.get("ok", false)
 +	if ok and dir == "mods":
-+		# Give the browser time to persist user:// to IndexedDB before reloading.
 +		_reload_ms = maxi(_reload_ms, 1500 + int(size / 1048576.0 * 60.0))
 +	_busy = false
 +	_play("coin" if ok else "bump")
@@ -1306,10 +1223,7 @@ index 0000000..f83e70a
 +	_push_listing(dir, message, false)
 +
 +
-+# --- Delete ------------------------------------------------------------------
-+
 +func _delete(dir: String, item: String) -> void:
-+	# Only plain names that are really in the folder; never a path.
 +	var known := false
 +	for entry in _listing(dir):
 +		if entry["n"] == item and entry["t"] != "dir":
@@ -1338,8 +1252,6 @@ index 0000000..f83e70a
 +		_finish(true, "Reloading to apply mod changes...", ms)
 +
 +
-+# --- Helpers -----------------------------------------------------------------
-+
 +func _status(text: String) -> void:
 +	JavaScriptBridge.eval("window.smbImporter.status(%s);" % JSON.stringify(text), true)
 +
@@ -1364,7 +1276,6 @@ index 0000000..f83e70a
 +	return {"ok": false, "message": message}
 +
 +
-+## Keeps letters, digits, space, dot, dash and underscore.
 +static func _sanitize(text: String) -> String:
 +	var out := ""
 +	for ch in text:
@@ -1383,16 +1294,12 @@ index 0000000..f83e70a
 +	return _install_folder(zip_path, file_name, "CharacterInfo.json", "custom_characters", "character")
 +
 +
-+## Unpacks a zip into config_path/<folder>/<id>. marker is the file that identifies the
-+## content type (pack_info.json, CharacterInfo.json); label is the word used in messages.
 +static func _install_folder(zip_path: String, file_name: String, marker: String, folder: String, label: String) -> Dictionary:
 +	var zip := ZIPReader.new()
 +	if zip.open(zip_path) != OK:
 +		return _err("Not a valid zip file.")
 +	var files := zip.get_files()
 +
-+	# Find the shallowest marker file: the content is either at the zip root or
-+	# inside one folder (the usual result of zipping a folder).
 +	var info_path := ""
 +	for f in files:
 +		if f.begins_with("__MACOSX/") or f.get_file() != marker:
@@ -1403,13 +1310,13 @@ index 0000000..f83e70a
 +		zip.close()
 +		return _err("Not a %s: no %s found." % [label, marker])
 +
-+	var prefix := info_path.get_base_dir() # "" when at the root
++	var prefix := info_path.get_base_dir()
 +	var pack_id := _sanitize(prefix.get_file() if prefix != "" else file_name.get_basename())
 +	if pack_id == "" or (folder == "resource_packs" and pack_id == Global.ROM_PACK_NAME):
 +		pack_id = "imported_" + label.replace(" ", "_")
 +	var dest_root: String = Global.config_path.path_join(folder).path_join(pack_id)
 +	if DirAccess.dir_exists_absolute(dest_root):
-+		Global.trash_or_delete(dest_root) # re-importing replaces the old copy
++		Global.trash_or_delete(dest_root)
 +
 +	var written := 0
 +	for f in files:
@@ -1421,7 +1328,7 @@ index 0000000..f83e70a
 +				continue
 +			rel = f.substr(prefix.length() + 1)
 +		if rel == "" or rel.begins_with("/") or ".." in rel.split("/"):
-+			continue # never write outside the destination folder
++			continue
 +		var dest: String = dest_root.path_join(rel)
 +		DirAccess.make_dir_recursive_absolute(dest.get_base_dir())
 +		var out := FileAccess.open(dest, FileAccess.WRITE)
@@ -1464,22 +1371,15 @@ index 0000000..f83e70a
 +	return {"ok": true, "message": "Added mod \"%s\". It loads when the game reloads." % zip_name}
 diff --git a/Scripts/UI/WebRomPicker.gd b/Scripts/UI/WebRomPicker.gd
 new file mode 100644
-index 0000000..3eee48f
+index 0000000..47ba118
 --- /dev/null
 +++ b/Scripts/UI/WebRomPicker.gd
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,98 @@
 +class_name WebRomPicker
 +extends RefCounted
-+## Browser ROM picker for the Web export (iOS Safari friendly).
-+##
-+## iOS Safari only opens a file picker if input.click() runs inside the user's
-+## tap handler. Godot's Button.pressed fires later (next engine frame), which
-+## Safari rejects, so the hidden <input type="file"> is opened from a DOM-level
-+## touchend/pointerup/click listener while the picker is "armed". The chosen
-+## file is read in JS and handed to Godot as base64 through a JS callback.
 +
 +signal rom_loaded(file_name: String, data: PackedByteArray)
-+signal rom_rejected(reason: String) ## "too_large" or "read_error"
++signal rom_rejected(reason: String)
 +signal picker_cancelled
 +
 +const MAX_ROM_BYTES := 2 * 1024 * 1024
@@ -1559,8 +1459,6 @@ index 0000000..3eee48f
 +	_js_callback = null
 +
 +
-+## Fallback for browsers that allow opening the picker outside a DOM gesture
-+## (desktop). On iOS the armed DOM listener does the real work.
 +func open_now() -> void:
 +	if OS.has_feature("web"):
 +		JavaScriptBridge.eval("if (window.smbRomPicker) { window.smbRomPicker.open(); }", true)
@@ -1577,7 +1475,7 @@ index 0000000..3eee48f
 +			picker_cancelled.emit()
 diff --git a/WEB_BUILD.md b/WEB_BUILD.md
 new file mode 100644
-index 0000000..3770b5a
+index 0000000..e9823b6
 --- /dev/null
 +++ b/WEB_BUILD.md
 @@ -0,0 +1,32 @@
@@ -1589,7 +1487,7 @@ index 0000000..3770b5a
 +
 +## Touch controls
 +
-+Shown automatically on touch devices and hidden while a gamepad is connected or used. They are laid out from the real visible area, so they stay at the screen edges and keep a thumb-friendly size for every **Size** setting, window shape and per-level resolution. Set `always_show` on the `TouchControls` autoload to test on desktop.
++Shown automatically on touch-first devices (phones, tablets) and hidden while a gamepad is connected or used. On desktop browsers they stay hidden, as does the **CUSTOMIZE TOUCH LAYOUT** entry. On a touchscreen laptop they appear after the first screen touch and hide again on the next key press or mouse click. They are laid out from the real visible area, so they stay at the screen edges and keep a thumb-friendly size for every **Size** setting, window shape and per-level resolution. Set `always_show` on the `TouchControls` autoload to test on desktop.
 +
 +**Customize layout:** Settings → Video → **CUSTOMIZE TOUCH LAYOUT** opens an editor. Drag any control to move it, tap one and use **+ / -** to resize it (tap empty space first to resize them all), **RESET** restores the default, **DONE** saves. The layout is stored in the browser next to your save data.
 +
@@ -1614,41 +1512,37 @@ index 0000000..3770b5a
 +
 +Notes: single-threaded export (no SharedArrayBuffer/COOP/COEP needed); GDExtensions (Discord RPC, godotgif) are disabled on Web.
 diff --git a/addons/mod_loader/mod_loader.gd b/addons/mod_loader/mod_loader.gd
-index 5ce020f..aada591 100644
+index 5ce020f..3033f20 100644
 --- a/addons/mod_loader/mod_loader.gd
 +++ b/addons/mod_loader/mod_loader.gd
-@@ -32,6 +32,10 @@ const LOG_NAME := "ModLoader"
+@@ -32,6 +32,9 @@ const LOG_NAME := "ModLoader"
  
  
  func _init() -> void:
-+	# Web: only runs when mods were imported (see ModLoaderStore._init).
 +	if OS.has_feature("web") and not ModLoaderStore.ml_options.enable_mods:
 +		return
 +
  	# if mods are not enabled - don't load mods
  	if ModLoaderStore.REQUIRE_CMD_LINE and not _ModLoaderCLI.is_running_with_command_line_arg("--enable-mods"):
  		return
-@@ -210,6 +214,9 @@ func _init() -> void:
+@@ -210,6 +213,9 @@ func _init() -> void:
  
  
  func _ready():
 +	if OS.has_feature("web"):
-+		return # the mod hook packer writes a zip next to the executable; no such place on Web
++		return
 +
  	# Hooks must be generated after all autoloads are available.
  	# Variables initialized with an autoload property cause errors otherwise.
  	if _ModLoaderHooks.any_mod_hooked:
 diff --git a/addons/mod_loader/mod_loader_store.gd b/addons/mod_loader/mod_loader_store.gd
-index c3640b4..c4a999c 100644
+index c3640b4..a08008a 100644
 --- a/addons/mod_loader/mod_loader_store.gd
 +++ b/addons/mod_loader/mod_loader_store.gd
-@@ -117,14 +117,43 @@ var has_feature := {
+@@ -117,14 +117,36 @@ var has_feature := {
  # =============================================================================
  
  func _init():
-+	# Web: stay inert (as before) unless the player imported mods from Settings.
-+	# The loader writes to user://logs and user://mods, which don't exist on a
-+	# fresh browser profile, so create them before anything is logged.
 +	var web := OS.has_feature("web")
 +	if web:
 +		if not _web_should_load_mods():
@@ -1660,16 +1554,12 @@ index c3640b4..c4a999c 100644
  	_update_ml_options_from_options_resource()
  	_update_ml_options_from_cli_args()
 +	if web:
-+		# The options resource has a "web" override that turns mods off; imported
-+		# mods are the one case where we want them on.
 +		ml_options.enable_mods = true
  	_configure_logger()
  	# ModLoaderStore is passed as argument so the cache data can be loaded on _init()
  	_ModLoaderCache.init_cache(self)
  
  
-+## Web: true when mod zips were imported into user://mods, unless the page was
-+## opened with ?nomods (safe mode, in case an imported mod breaks startup).
 +func _web_should_load_mods() -> bool:
 +	var query = JavaScriptBridge.eval("window.location.search", true)
 +	if query is String and "nomods" in query:
@@ -1687,10 +1577,10 @@ index c3640b4..c4a999c 100644
  	_ModLoaderCache.save_to_file()
  
 diff --git a/export_presets.cfg b/export_presets.cfg
-index 2d2877f..285f584 100644
+index 2d2877f..ac53915 100644
 --- a/export_presets.cfg
 +++ b/export_presets.cfg
-@@ -122,3 +122,365 @@ rm -rf \"{temp_dir}\""
+@@ -122,3 +122,364 @@ rm -rf \"{temp_dir}\""
  dotnet/include_scripts_content=false
  dotnet/include_debug_symbols=true
  dotnet/embed_build_outputs=false
@@ -1825,13 +1715,14 @@ index 2d2877f..285f584 100644
 +    return !!(coarse || ua || ipadOs);
 +  }
 +  function updatePortrait() {
-+    var p = isTouchDevice() && window.innerHeight > window.innerWidth;
++    var touch = isTouchDevice();
++    var p = touch && window.innerHeight > window.innerWidth;
++    window.smbTouchDevice = touch;
 +    window.smbPortrait = p;
 +    document.documentElement.classList.toggle('smb-portrait', p);
 +    if (rot) { rot.style.display = p ? 'flex' : 'none'; }
 +  }
 +
-+  // File browser: the page draws it, Godot owns the files (see WebImporter.gd).
 +  function notify(evt, dir, name, extra) {
 +    var cb = window.smbImportCallback;
 +    if (typeof cb === 'function') { cb(evt, dir === undefined ? st.dir : dir, name || '', extra === undefined ? '' : extra); }
@@ -1951,8 +1842,6 @@ index 2d2877f..285f584 100644
 +      notify('delete', st.dir, it.n);
 +    });
 +
-+    // Open the chooser from the tap itself (same trick as the ROM picker): a tap on a
-+    // file input is not reliable on touch browsers.
 +    var lastOpen = 0;
 +    function openPicker() {
 +      if (st.busy) { return; }

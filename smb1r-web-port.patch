@@ -10,6 +10,34 @@ index 0000000..6b90c8b
 +
 +[node name="TouchControls" type="CanvasLayer"]
 +script = ExtResource("1_touch")
+diff --git a/Scenes/Prefabs/Autoload/NewLevelBuilder.gd b/Scenes/Prefabs/Autoload/NewLevelBuilder.gd
+index efed5a0..3972323 100755
+--- a/Scenes/Prefabs/Autoload/NewLevelBuilder.gd
++++ b/Scenes/Prefabs/Autoload/NewLevelBuilder.gd
+@@ -2,7 +2,11 @@ extends Node
+ 
+ const base64_charset := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+ 
+-const BASE_LEVEL_SCENE: PackedScene = preload("res://Scenes/Levels/CustomLevelBase.tscn")
++## Loaded on first use, not preloaded: it drags in ~190 resources (tiles, level
++## background, sounds) that are not needed until a custom level is built, and on
++## Web that keeps memory down while the ROM picker is open.
++const BASE_LEVEL_SCENE_PATH := "res://Scenes/Levels/CustomLevelBase.tscn"
++var _base_level_scene: PackedScene = null
+ var sub_level_file = null
+ var level_file := {}
+ 
+@@ -20,7 +24,9 @@ func load_level(temp_level_file := {}) -> void:
+ 	building = false
+ 
+ func build_sublevel(level_idx := 0, temp_level_file := {}) -> PackedScene:
+-	var level = BASE_LEVEL_SCENE.instantiate()
++	if _base_level_scene == null:
++		_base_level_scene = load(BASE_LEVEL_SCENE_PATH)
++	var level = _base_level_scene.instantiate()
+ 	level.sublevel_id = level_idx
+ 	level.level_id = Global.level_num
+ 	level.world_id = Global.world_num
 diff --git a/Scripts/Classes/Singletons/DiscordManager.gd b/Scripts/Classes/Singletons/DiscordManager.gd
 index f09eec5..238dd1f 100644
 --- a/Scripts/Classes/Singletons/DiscordManager.gd
@@ -1175,7 +1203,7 @@ diff --git a/export_presets.cfg b/export_presets.cfg
 index 2d2877f..45d1cc9 100644
 --- a/export_presets.cfg
 +++ b/export_presets.cfg
-@@ -122,3 +122,240 @@ rm -rf \"{temp_dir}\""
+@@ -122,3 +122,236 @@ rm -rf \"{temp_dir}\""
  dotnet/include_scripts_content=false
  dotnet/include_debug_symbols=true
  dotnet/embed_build_outputs=false
@@ -1263,13 +1291,9 @@ index 2d2877f..45d1cc9 100644
 +</script>
 +<style>
 +#smb-rotate, #smb-import { position: fixed; left: 0; top: 0; right: 0; bottom: 0; display: none; align-items: center; justify-content: center; flex-direction: column; box-sizing: border-box; padding: 24px; text-align: center; color: #fff; font: bold 14px/1.6 monospace; text-transform: uppercase; letter-spacing: 1px; -webkit-user-select: none; user-select: none; }
-+#smb-rotate { z-index: 100001; background: #000; touch-action: none; }
++#smb-rotate { z-index: 100001; background: #000; touch-action: none; font: 20px/1.4 -apple-system, Helvetica, Arial, sans-serif; text-transform: none; letter-spacing: 0; }
 +#smb-import { z-index: 100000; background: rgba(0, 0, 0, 0.82); }
 +html.smb-portrait canvas { visibility: hidden; }
-+#smb-rotate .ico { width: 56px; height: 92px; margin: 0 auto 26px; border: 4px solid #fff; border-radius: 10px; box-sizing: border-box; animation: smb-rot 2.4s ease-in-out infinite; }
-+@keyframes smb-rot { 0%, 20% { transform: rotate(0deg); } 60%, 100% { transform: rotate(-90deg); } }
-+#smb-rotate .big { font-size: 18px; margin-bottom: 10px; }
-+#smb-rotate .small { font-size: 11px; opacity: 0.65; max-width: 280px; }
 +#smb-card { width: 100%; max-width: 360px; padding: 18px 16px; background: #111; border: 3px solid #fff; border-radius: 6px; box-sizing: border-box; }
 +#smb-title { font-size: 16px; margin-bottom: 8px; }
 +#smb-msg { font-size: 11px; opacity: 0.85; margin-bottom: 14px; min-height: 18px; }
@@ -1314,7 +1338,7 @@ index 2d2877f..45d1cc9 100644
 +    ready = true;
 +    rot = document.createElement('div');
 +    rot.id = 'smb-rotate';
-+    rot.innerHTML = '<div class=\"ico\"></div><div class=\"big\">Please rotate your device</div><div class=\"small\">This game is played in landscape. If nothing happens, turn off orientation lock.</div>';
++    rot.textContent = 'Please rotate your device';
 +    document.body.appendChild(rot);
 +    ov = document.createElement('div');
 +    ov.id = 'smb-import';

@@ -140,21 +140,15 @@ index 27894d2..11cfc17 100644
  	var track: int = animation.find_track("AudioStreamPlayer", Animation.TYPE_AUDIO)
  	for key in animation.track_get_key_count(track):
 diff --git a/Scripts/Parts/ResourcePackLoader.gd b/Scripts/Parts/ResourcePackLoader.gd
-index 10ea6d1..901f18d 100644
+index 10ea6d1..f940b50 100644
 --- a/Scripts/Parts/ResourcePackLoader.gd
 +++ b/Scripts/Parts/ResourcePackLoader.gd
-@@ -1,14 +1,26 @@
- extends Node
- const RESOURCE_PACK_CONTAINER = preload("uid://lggi3b4310yl")
-+const SELECTABLE_BUTTON = preload("res://Scenes/Parts/SelectableOptionButton.tscn")
- 
+@@ -4,11 +4,20 @@ const RESOURCE_PACK_CONTAINER = preload("uid://lggi3b4310yl")
  var resource_packs := []
  var containers := []
  
-+## Web only: browser file browser for packs and mods (see WebImporter).
++## Web only: browser file browser for AppData (see WebImporter).
 +var importer: WebImporter = null
-+var remove_mods_row = null # SelectableOptionButton
-+var remove_mods_armed := false
 +
  
  func _ready() -> void:
@@ -162,19 +156,20 @@ index 10ea6d1..901f18d 100644
 +	if OS.has_feature("web"):
 +		setup_web_import()
  
-+## Web has no file manager, so "open folder" opens the in-page file browser.
++## Web has no file manager, so "open folder" opens the in-page file browser at AppData.
  func open_folder() -> void:
 +	if OS.has_feature("web"):
-+		importer.open("resource_packs")
++		importer.open("")
 +		return
  	OS.shell_show_in_file_manager(ProjectSettings.globalize_path(Global.config_path.path_join("resource_packs")), true)
  
  func get_resource_packs() -> void:
-@@ -24,6 +36,60 @@ func get_resource_packs() -> void:
+@@ -24,6 +33,37 @@ func get_resource_packs() -> void:
  		if FileAccess.file_exists(pack_info_path) and i != Global.ROM_PACK_NAME:
  			create_container(Global.config_path.path_join("resource_packs/" + i))
  
-+## Web: repurpose the "open folder" row to browse packs and add mod rows under it.
++## Web: the section is just one "BROWSE APPDATA" row (the repurposed "open folder" row);
++## the refresh and create-pack rows are dropped. The pack list below it stays.
 +func setup_web_import() -> void:
 +	importer = WebImporter.new()
 +	add_child(importer)
@@ -183,38 +178,14 @@ index 10ea6d1..901f18d 100644
 +	var rows: Node = $"../VBoxContainer"
 +	var open_row = rows.get_node_or_null("SelectableOptionNode")
 +	if open_row:
-+		open_row.title = "BROWSE RESOURCE PACKS"
++		open_row.title = "BROWSE APPDATA"
 +
-+	var browse_mods = add_web_row(rows, "BROWSE MODS", 3)
-+	browse_mods.button_pressed.connect(func() -> void: importer.open("mods"))
-+	remove_mods_row = add_web_row(rows, "REMOVE ALL MODS", 4)
-+	remove_mods_row.button_pressed.connect(on_remove_mods_pressed)
-+
-+	# Two extra rows: give them room by shrinking the scrolling pack list a little.
-+	var scroll: Control = $"../ScrollContainer"
-+	scroll.custom_minimum_size.y = maxf(48.0, scroll.custom_minimum_size.y - 32.0)
-+
-+func add_web_row(rows: Node, title: String, option_index: int):
-+	var row = SELECTABLE_BUTTON.instantiate()
-+	row.title = title
-+	rows.add_child(row)
-+	row.add_to_group("Options")
-+	# Keep menu navigation order = visual order (these sit above the pack list).
-+	get_parent().options.insert(option_index, row)
-+	return row
-+
-+## Two presses: the first asks for confirmation so a stray tap can't wipe mods.
-+func on_remove_mods_pressed() -> void:
-+	if not remove_mods_armed:
-+		remove_mods_armed = true
-+		remove_mods_row.title = "PRESS AGAIN TO CONFIRM"
-+		await get_tree().create_timer(3.0).timeout
-+		remove_mods_armed = false
-+		remove_mods_row.title = "REMOVE ALL MODS"
-+		return
-+	remove_mods_armed = false
-+	remove_mods_row.title = "REMOVE ALL MODS"
-+	importer.remove_all_mods()
++	# Keep menu navigation in step: take the extra rows out of the options list first.
++	for row_name in ["SelectableOptionNode2", "SelectableOptionNode3"]:
++		var row = rows.get_node_or_null(row_name)
++		if row:
++			get_parent().options.erase(row)
++			row.queue_free()
 +
 +## GifManager comes from the godotgif GDExtension, which doesn't exist on Web
 +## (or if the library fails to load), so look it up at runtime, not by name.
@@ -231,7 +202,7 @@ index 10ea6d1..901f18d 100644
  func create_container(resource_pack := "") -> void:
  	var container = RESOURCE_PACK_CONTAINER.instantiate()
  	container.pack_json = JSONParser.parse_to_dict(resource_pack + "/pack_info.json")
-@@ -35,7 +101,7 @@ func create_container(resource_pack := "") -> void:
+@@ -35,7 +75,7 @@ func create_container(resource_pack := "") -> void:
  		image.load(resource_pack + "/icon.png")
  		container.icon = ImageTexture.create_from_image(image)
  	elif FileAccess.file_exists(resource_pack + "/icon.gif"):
@@ -1124,13 +1095,13 @@ index 0000000..fdc0142
 +	row.button_pressed.connect(TouchControls.begin_layout_edit)
 diff --git a/Scripts/UI/WebImporter.gd b/Scripts/UI/WebImporter.gd
 new file mode 100644
-index 0000000..312c8b5
+index 0000000..f83e70a
 --- /dev/null
 +++ b/Scripts/UI/WebImporter.gd
-@@ -0,0 +1,337 @@
+@@ -0,0 +1,363 @@
 +class_name WebImporter
 +extends Node
-+## File browser for resource packs and mods (Web export only).
++## File browser for resource packs, mods and custom characters (Web export only).
 +##
 +## The page (export_presets.cfg head_include) provides window.smbImporter: a modal file
 +## browser drawn in HTML on top of the game (path bar, Refresh, Import file..., and an
@@ -1144,9 +1115,10 @@ index 0000000..312c8b5
 +## It is HTML (not Godot controls) because iOS Safari only opens a file chooser from a
 +## genuine tap on the page, never from a Godot Button press.
 +##
-+## Folders: "" (the root, listing the two below), "mods" (zips kept in user://mods) and
-+## "resource_packs" (one folder per pack). Mods load at startup, so any mod change
-+## reloads the page when the player leaves the browser.
++## Folders: "" (the root, AppData, listing the three below), "mods" (zips kept in
++## user://mods), "resource_packs" (one folder per pack) and "custom_characters" (one folder
++## per character). Mods load at startup, so any mod change reloads the page when the
++## player leaves the browser. Characters are read each time the character select opens.
 +##
 +## A picked file stays in the page. We pull it across in base64 chunks (so big zips never
 +## need one giant string), write it to a temp file in user://, then install it.
@@ -1158,7 +1130,7 @@ index 0000000..312c8b5
 +const CHUNK_BYTES := 393216
 +const TMP_PATH := "user://import_tmp.zip"
 +const MODS_DIR := "user://mods"
-+const ROOT_DIRS := ["mods", "resource_packs"]
++const ROOT_DIRS := ["mods", "resource_packs", "custom_characters"]
 +
 +var _callback: JavaScriptObject = null
 +var _busy := false
@@ -1166,12 +1138,13 @@ index 0000000..312c8b5
 +var _reload_ms := 0
 +
 +
-+## dir: "" (root), "mods" or "resource_packs"
++## dir: "" (root), "mods", "resource_packs" or "custom_characters"
 +func open(dir := "") -> void:
 +	if not OS.has_feature("web") or _busy:
 +		return
 +	DirAccess.make_dir_recursive_absolute(MODS_DIR)
 +	DirAccess.make_dir_recursive_absolute(_packs_dir())
++	DirAccess.make_dir_recursive_absolute(_chars_dir())
 +	_connect()
 +	var shown := dir if dir in ROOT_DIRS else ""
 +	JavaScriptBridge.eval("window.smbImporter.open(%s, %s, %d);" % [
@@ -1223,7 +1196,11 @@ index 0000000..312c8b5
 +	return Global.config_path.path_join("resource_packs")
 +
 +
-+## Items for the page: {"n": name, "t": "dir" | "zip" | "pack", "s": size in bytes}.
++func _chars_dir() -> String:
++	return Global.config_path.path_join("custom_characters")
++
++
++## Items for the page: {"n": name, "t": "dir" | "zip" | "pack" | "char", "s": size in bytes}.
 +func _listing(dir: String) -> Array:
 +	var items := []
 +	match dir:
@@ -1242,6 +1219,11 @@ index 0000000..312c8b5
 +			for d in dirs:
 +				if d != Global.ROM_PACK_NAME: # the generated base assets are not a user pack
 +					items.append({"n": d, "t": "pack", "s": _dir_size(_packs_dir().path_join(d))})
++		"custom_characters":
++			var chars := DirAccess.get_directories_at(_chars_dir())
++			chars.sort()
++			for d in chars:
++				items.append({"n": d, "t": "char", "s": _dir_size(_chars_dir().path_join(d))})
 +	return items
 +
 +
@@ -1273,7 +1255,7 @@ index 0000000..312c8b5
 +
 +func _receive(dir: String, file_name: String, size: int) -> void:
 +	if not dir in ROOT_DIRS:
-+		_push_listing("", "Open the mods or resource_packs folder first.", false)
++		_push_listing("", "Open the mods, resource_packs or custom_characters folder first.", false)
 +		return
 +	_busy = true
 +	_status("Reading file...")
@@ -1301,6 +1283,8 @@ index 0000000..312c8b5
 +	var result: Dictionary
 +	if dir == "mods":
 +		result = install_mod(TMP_PATH, file_name)
++	elif dir == "custom_characters":
++		result = install_character(TMP_PATH, file_name)
 +	else:
 +		result = install_resource_pack(TMP_PATH, file_name)
 +	_cleanup()
@@ -1337,6 +1321,9 @@ index 0000000..312c8b5
 +		DirAccess.remove_absolute(MODS_DIR.path_join(item))
 +		_reload_ms = maxi(_reload_ms, 1500)
 +		_push_listing(dir, "Removed \"%s\". It unloads when the game reloads." % item, true)
++	elif dir == "custom_characters":
++		Global.trash_or_delete(_chars_dir().path_join(item))
++		_push_listing(dir, "Removed character \"%s\"." % item, true)
 +	else:
 +		Global.trash_or_delete(_packs_dir().path_join(item))
 +		_push_listing(dir, "Removed pack \"%s\"." % item, true)
@@ -1389,28 +1376,38 @@ index 0000000..312c8b5
 +
 +
 +static func install_resource_pack(zip_path: String, file_name: String) -> Dictionary:
++	return _install_folder(zip_path, file_name, "pack_info.json", "resource_packs", "resource pack")
++
++
++static func install_character(zip_path: String, file_name: String) -> Dictionary:
++	return _install_folder(zip_path, file_name, "CharacterInfo.json", "custom_characters", "character")
++
++
++## Unpacks a zip into config_path/<folder>/<id>. marker is the file that identifies the
++## content type (pack_info.json, CharacterInfo.json); label is the word used in messages.
++static func _install_folder(zip_path: String, file_name: String, marker: String, folder: String, label: String) -> Dictionary:
 +	var zip := ZIPReader.new()
 +	if zip.open(zip_path) != OK:
 +		return _err("Not a valid zip file.")
 +	var files := zip.get_files()
 +
-+	# Find the shallowest pack_info.json: the pack is either at the zip root or
++	# Find the shallowest marker file: the content is either at the zip root or
 +	# inside one folder (the usual result of zipping a folder).
 +	var info_path := ""
 +	for f in files:
-+		if f.begins_with("__MACOSX/") or f.get_file() != "pack_info.json":
++		if f.begins_with("__MACOSX/") or f.get_file() != marker:
 +			continue
 +		if info_path == "" or f.count("/") < info_path.count("/"):
 +			info_path = f
 +	if info_path == "":
 +		zip.close()
-+		return _err("Not a resource pack: no pack_info.json found.")
++		return _err("Not a %s: no %s found." % [label, marker])
 +
 +	var prefix := info_path.get_base_dir() # "" when at the root
 +	var pack_id := _sanitize(prefix.get_file() if prefix != "" else file_name.get_basename())
-+	if pack_id == "" or pack_id == Global.ROM_PACK_NAME:
-+		pack_id = "imported_pack"
-+	var dest_root: String = Global.config_path.path_join("resource_packs").path_join(pack_id)
++	if pack_id == "" or (folder == "resource_packs" and pack_id == Global.ROM_PACK_NAME):
++		pack_id = "imported_" + label.replace(" ", "_")
++	var dest_root: String = Global.config_path.path_join(folder).path_join(pack_id)
 +	if DirAccess.dir_exists_absolute(dest_root):
 +		Global.trash_or_delete(dest_root) # re-importing replaces the old copy
 +
@@ -1424,7 +1421,7 @@ index 0000000..312c8b5
 +				continue
 +			rel = f.substr(prefix.length() + 1)
 +		if rel == "" or rel.begins_with("/") or ".." in rel.split("/"):
-+			continue # never write outside the pack folder
++			continue # never write outside the destination folder
 +		var dest: String = dest_root.path_join(rel)
 +		DirAccess.make_dir_recursive_absolute(dest.get_base_dir())
 +		var out := FileAccess.open(dest, FileAccess.WRITE)
@@ -1437,9 +1434,9 @@ index 0000000..312c8b5
 +	zip.close()
 +
 +	if written == 0:
-+		return _err("The pack was empty.")
++		return _err("The %s was empty." % label)
 +	return {"ok": true, "pack_id": pack_id,
-+			"message": "Added pack \"%s\" (%d files)." % [pack_id, written]}
++			"message": "Added %s \"%s\" (%d files)." % [label, pack_id, written]}
 +
 +
 +static func install_mod(zip_path: String, file_name: String) -> Dictionary:
@@ -1580,10 +1577,10 @@ index 0000000..3eee48f
 +			picker_cancelled.emit()
 diff --git a/WEB_BUILD.md b/WEB_BUILD.md
 new file mode 100644
-index 0000000..95736f8
+index 0000000..3770b5a
 --- /dev/null
 +++ b/WEB_BUILD.md
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,32 @@
 +# Web (iOS Safari) build
 +
 +Build: run the **web build** workflow from the GitHub Actions tab (works from a phone). Download the `web` artifact, or tick *deploy_pages* to publish to GitHub Pages. Locally: `godot --headless --export-release "Web" build/web/index.html`.
@@ -1602,17 +1599,16 @@ index 0000000..95736f8
 +
 +On phones/tablets held upright the page shows a "please rotate your device" screen, and the game is paused and muted until the device is in landscape. Desktop browsers are never blocked.
 +
-+## Importing resource packs and mods
++## Importing resource packs, mods and custom characters
 +
-+Settings > Resource Packs has **BROWSE RESOURCE PACKS** and **BROWSE MODS**. Both open the in-page **File Browser** (HTML drawn over the game, so the Files app opens from a real tap):
++Settings > Resource Packs has one **BROWSE APPDATA** row (imported packs are switched on in the list under it). It opens the in-page **File Browser** (HTML drawn over the game, so the Files app opens from a real tap):
 +
-+- The path bar starts at **AppData**, which holds two folders: `mods` and `resource_packs`. Tap a folder to open it, **Up** or **AppData** to go back, **Refresh** to re-read it.
-+- **Import file...** (inside `mods` or `resource_packs`) picks a `.zip` from the Files app. A resource pack zip needs a `pack_info.json` (at the root or inside one folder) and is unpacked into the browser's storage. A mod zip is a Godot Mod Loader zip with a `mods-unpacked/<Mod>/manifest.json`.
++- The path bar starts at **AppData**, which holds three folders: `mods`, `resource_packs` and `custom_characters`. Tap a folder to open it, **Up** or **AppData** to go back, **Refresh** to re-read it.
++- **Import file...** (inside `mods`, `resource_packs` or `custom_characters`) picks a `.zip` from the Files app. A resource pack zip needs a `pack_info.json` and a custom character zip needs a `CharacterInfo.json` (either at the root or inside one folder, which names the character); both are unpacked into the browser's storage. Characters show up the next time the character select opens. A mod zip is a Godot Mod Loader zip with a `mods-unpacked/<Mod>/manifest.json`.
 +- **...** on a row opens the actions menu (delete).
 +- **Return to Options** closes the browser. Mods load at startup, so if you added or removed a mod the page reloads at that point to apply it (import as many as you like first).
-+- **REMOVE ALL MODS** (in the menu, press twice) still deletes every mod and reloads.
 +
-+Safe mode: if an imported mod stops the game from starting, open the site with `?nomods` on the end of the address (e.g. `https://you.github.io/repo/?nomods`), then use REMOVE ALL MODS.
++Safe mode: if an imported mod stops the game from starting, open the site with `?nomods` on the end of the address (e.g. `https://you.github.io/repo/?nomods`), then delete the mod from the `mods` folder in BROWSE APPDATA.
 +
 +Files up to 96 MB are accepted. Mods are not loaded at all until you import one.
 +
@@ -1691,10 +1687,10 @@ index c3640b4..c4a999c 100644
  	_ModLoaderCache.save_to_file()
  
 diff --git a/export_presets.cfg b/export_presets.cfg
-index 2d2877f..a7b5d8c 100644
+index 2d2877f..285f584 100644
 --- a/export_presets.cfg
 +++ b/export_presets.cfg
-@@ -122,3 +122,364 @@ rm -rf \"{temp_dir}\""
+@@ -122,3 +122,365 @@ rm -rf \"{temp_dir}\""
  dotnet/include_scripts_content=false
  dotnet/include_debug_symbols=true
  dotnet/embed_build_outputs=false
@@ -1807,6 +1803,7 @@ index 2d2877f..a7b5d8c 100644
 +#smb-fb .ico.dir { background: #6b5a1c; }
 +#smb-fb .ico.zip { background: #8a6d0b; }
 +#smb-fb .ico.pack { background: #1f6b4a; }
++#smb-fb .ico.char { background: #1f4a8a; }
 +#smb-fb .fb-empty { padding: 18px 12px; opacity: 0.7; }
 +#smb-fb .fb-cover { position: absolute; left: 0; top: 0; right: 0; bottom: 0; display: none; align-items: center; justify-content: center; flex-direction: column; text-align: center; padding: 24px; box-sizing: border-box; }
 +#smb-fb-busy { background: #151515; }
@@ -1865,7 +1862,7 @@ index 2d2877f..a7b5d8c 100644
 +    if (st.busy) { return; }
 +    st.pending = it;
 +    el.sheetTitle.textContent = 'Delete ' + it.n + '?';
-+    el.sheetNote.textContent = st.dir === 'mods' ? 'The mod unloads when the game reloads.' : 'The resource pack folder is deleted.';
++    el.sheetNote.textContent = st.dir === 'mods' ? 'The mod unloads when the game reloads.' : (st.dir === 'custom_characters' ? 'The character folder is deleted.' : 'The resource pack folder is deleted.');
 +    el.sheet.style.display = 'flex';
 +  }
 +
@@ -1888,7 +1885,7 @@ index 2d2877f..a7b5d8c 100644
 +    st.items.forEach(function (it) {
 +      var row = mk('div', 'fb-row' + (it.t === 'dir' ? ' nav' : ''));
 +      var name = mk('div', 'c-name');
-+      name.appendChild(mk('span', 'ico ' + it.t, it.t === 'dir' ? 'DIR' : (it.t === 'pack' ? 'PACK' : 'ZIP')));
++      name.appendChild(mk('span', 'ico ' + it.t, it.t === 'dir' ? 'DIR' : (it.t === 'pack' ? 'PACK' : (it.t === 'char' ? 'CHAR' : 'ZIP'))));
 +      name.appendChild(document.createTextNode(it.n));
 +      row.appendChild(name);
 +      row.appendChild(mk('div', 'c-size', fmtSize(it.s)));
@@ -1959,7 +1956,7 @@ index 2d2877f..a7b5d8c 100644
 +    var lastOpen = 0;
 +    function openPicker() {
 +      if (st.busy) { return; }
-+      if (!st.dir) { setMsg('Open the mods or resource_packs folder, then tap Import file...', true); return; }
++      if (!st.dir) { setMsg('Open the mods, resource_packs or custom_characters folder, then tap Import file...', true); return; }
 +      var now = Date.now();
 +      if (now - lastOpen < 800) { return; }
 +      lastOpen = now;

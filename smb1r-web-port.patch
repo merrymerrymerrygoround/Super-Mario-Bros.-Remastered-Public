@@ -1,72 +1,3 @@
-diff --git a/.github/workflows/web-build.yml b/.github/workflows/web-build.yml
-new file mode 100644
-index 0000000..4b2af3d
---- /dev/null
-+++ b/.github/workflows/web-build.yml
-@@ -0,0 +1,63 @@
-+name: "web build"
-+on:
-+  workflow_dispatch:
-+    inputs:
-+      deploy_pages:
-+        description: "Also deploy to GitHub Pages (Settings > Pages > Source must be 'GitHub Actions')"
-+        type: boolean
-+        default: false
-+
-+env:
-+  GODOT_VERSION: "4.6-stable"
-+
-+jobs:
-+  export:
-+    runs-on: ubuntu-22.04
-+    steps:
-+      - uses: actions/checkout@v4
-+        with:
-+          lfs: true
-+      - name: Remove native GDExtensions (unsupported on Web)
-+        run: rm -f godotgif/godotgif.gdextension addons/discord-rpc-gd/bin/discord-rpc-gd.gdextension
-+      - name: Install Godot + export templates
-+        run: |
-+          BASE=https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}
-+          wget -q ${BASE}/Godot_v${GODOT_VERSION}_linux.x86_64.zip
-+          wget -q ${BASE}/Godot_v${GODOT_VERSION}_export_templates.tpz
-+          unzip -q Godot_v${GODOT_VERSION}_linux.x86_64.zip
-+          mv Godot_v${GODOT_VERSION}_linux.x86_64 /usr/local/bin/godot 2>/dev/null || sudo mv Godot_v${GODOT_VERSION}_linux.x86_64 /usr/local/bin/godot
-+          TPL=~/.local/share/godot/export_templates/${GODOT_VERSION/-/.}
-+          mkdir -p "$TPL"
-+          unzip -q Godot_v${GODOT_VERSION}_export_templates.tpz -d tpl
-+          mv tpl/templates/* "$TPL"/
-+      - name: Show installed export templates
-+        run: ls -R ~/.local/share/godot/export_templates | head -40
-+      - name: Import project
-+        run: godot --headless --import || true
-+      - name: Export Web
-+        run: |
-+          mkdir -p build/web
-+          godot --headless --export-release "Web" build/web/index.html
-+          ls -lh build/web
-+      - uses: actions/upload-artifact@v4
-+        with:
-+          name: web
-+          path: build/web
-+      - uses: actions/upload-pages-artifact@v3
-+        if: ${{ inputs.deploy_pages }}
-+        with:
-+          path: build/web
-+
-+  deploy:
-+    if: ${{ inputs.deploy_pages }}
-+    needs: export
-+    runs-on: ubuntu-22.04
-+    permissions:
-+      pages: write
-+      id-token: write
-+    environment:
-+      name: github-pages
-+      url: ${{ steps.deployment.outputs.page_url }}
-+    steps:
-+      - id: deployment
-+        uses: actions/deploy-pages@v4
 diff --git a/Scenes/Prefabs/Autoload/TouchControls.tscn b/Scenes/Prefabs/Autoload/TouchControls.tscn
 new file mode 100644
 index 0000000..6b90c8b
@@ -209,13 +140,82 @@ index 27894d2..11cfc17 100644
  	var track: int = animation.find_track("AudioStreamPlayer", Animation.TYPE_AUDIO)
  	for key in animation.track_get_key_count(track):
 diff --git a/Scripts/Parts/ResourcePackLoader.gd b/Scripts/Parts/ResourcePackLoader.gd
-index 10ea6d1..fd247a1 100644
+index 10ea6d1..8e5d434 100644
 --- a/Scripts/Parts/ResourcePackLoader.gd
 +++ b/Scripts/Parts/ResourcePackLoader.gd
-@@ -24,6 +24,18 @@ func get_resource_packs() -> void:
+@@ -1,14 +1,26 @@
+ extends Node
+ const RESOURCE_PACK_CONTAINER = preload("uid://lggi3b4310yl")
++const SELECTABLE_BUTTON = preload("res://Scenes/Parts/SelectableOptionButton.tscn")
+ 
+ var resource_packs := []
+ var containers := []
+ 
++## Web only: browser file import (see WebImporter).
++var importer: WebImporter = null
++var remove_mods_row = null # SelectableOptionButton
++var remove_mods_armed := false
++
+ 
+ func _ready() -> void:
+ 	get_resource_packs()
++	if OS.has_feature("web"):
++		setup_web_import()
+ 
++## Web has no file manager, so "open folder" becomes "import a pack".
+ func open_folder() -> void:
++	if OS.has_feature("web"):
++		importer.start("pack")
++		return
+ 	OS.shell_show_in_file_manager(ProjectSettings.globalize_path(Global.config_path.path_join("resource_packs")), true)
+ 
+ func get_resource_packs() -> void:
+@@ -24,6 +36,60 @@ func get_resource_packs() -> void:
  		if FileAccess.file_exists(pack_info_path) and i != Global.ROM_PACK_NAME:
  			create_container(Global.config_path.path_join("resource_packs/" + i))
  
++## Web: repurpose the "open folder" row to import a pack and add mod rows under it.
++func setup_web_import() -> void:
++	importer = WebImporter.new()
++	add_child(importer)
++	importer.pack_imported.connect(func(_id: String) -> void: get_resource_packs())
++
++	var rows: Node = $"../VBoxContainer"
++	var open_row = rows.get_node_or_null("SelectableOptionNode")
++	if open_row:
++		open_row.title = "IMPORT PACK (.ZIP)"
++
++	var import_mod = add_web_row(rows, "IMPORT MOD (.ZIP)", 3)
++	import_mod.button_pressed.connect(func() -> void: importer.start("mod"))
++	remove_mods_row = add_web_row(rows, "REMOVE ALL MODS", 4)
++	remove_mods_row.button_pressed.connect(on_remove_mods_pressed)
++
++	# Two extra rows: give them room by shrinking the scrolling pack list a little.
++	var scroll: Control = $"../ScrollContainer"
++	scroll.custom_minimum_size.y = maxf(48.0, scroll.custom_minimum_size.y - 32.0)
++
++func add_web_row(rows: Node, title: String, option_index: int):
++	var row = SELECTABLE_BUTTON.instantiate()
++	row.title = title
++	rows.add_child(row)
++	row.add_to_group("Options")
++	# Keep menu navigation order = visual order (these sit above the pack list).
++	get_parent().options.insert(option_index, row)
++	return row
++
++## Two presses: the first asks for confirmation so a stray tap can't wipe mods.
++func on_remove_mods_pressed() -> void:
++	if not remove_mods_armed:
++		remove_mods_armed = true
++		remove_mods_row.title = "PRESS AGAIN TO CONFIRM"
++		await get_tree().create_timer(3.0).timeout
++		remove_mods_armed = false
++		remove_mods_row.title = "REMOVE ALL MODS"
++		return
++	remove_mods_armed = false
++	remove_mods_row.title = "REMOVE ALL MODS"
++	importer.remove_all_mods()
++
 +## GifManager comes from the godotgif GDExtension, which doesn't exist on Web
 +## (or if the library fails to load), so look it up at runtime, not by name.
 +func load_gif_icon(path: String) -> Texture2D:
@@ -231,7 +231,7 @@ index 10ea6d1..fd247a1 100644
  func create_container(resource_pack := "") -> void:
  	var container = RESOURCE_PACK_CONTAINER.instantiate()
  	container.pack_json = JSONParser.parse_to_dict(resource_pack + "/pack_info.json")
-@@ -35,7 +47,7 @@ func create_container(resource_pack := "") -> void:
+@@ -35,7 +101,7 @@ func create_container(resource_pack := "") -> void:
  		image.load(resource_pack + "/icon.png")
  		container.icon = ImageTexture.create_from_image(image)
  	elif FileAccess.file_exists(resource_pack + "/icon.gif"):
@@ -380,32 +380,61 @@ index 359e252..7997662 100644
  func create_file_pointer(file_path: String) -> void:
 diff --git a/Scripts/UI/TouchControls.gd b/Scripts/UI/TouchControls.gd
 new file mode 100644
-index 0000000..68204c7
+index 0000000..716031e
 --- /dev/null
 +++ b/Scripts/UI/TouchControls.gd
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,339 @@
 +extends CanvasLayer
-+## On-screen NES-style controls (D-pad, A, B, Select, Start) for touch devices.
++## On-screen NES-style controls (D-pad, A, B, Select, Start, Run lock) for touch devices.
 +##
 +## Autoloaded. Shown automatically on touch-capable Web / mobile builds, hidden
 +## while a gamepad is connected or in use. Buttons are TouchScreenButtons whose
 +## primary `action` is set natively; extra actions (e.g. ui_accept) are sent as
 +## InputEventActions so menus and gameplay both work like the keyboard does.
++##
++## Layout: positions are recomputed from the *visible* viewport rect every time
++## it changes (window resize, rotation, Size setting, per-level resolution
++## enforcement), so the controls stay anchored to the real screen edges and keep
++## a thumb-friendly size at any aspect ratio.
++##
++## Portrait: the page (see export_presets.cfg head_include) shows a "rotate your
++## device" overlay and sets window.smbPortrait. While it is set the game is
++## paused and muted, and the controls are released.
 +
 +## Debug: force the controls on (e.g. desktop testing).
 +@export var always_show := false
 +
 +const LAYER := 100
++const PORTRAIT_POLL_SECONDS := 0.2
++## Layout constants below were designed for a 256x240 viewport (1 unit = 1 px there).
++const BASE_HEIGHT := 240.0
++const BASE_BUTTON := 32.0
++## Smallest comfortable thumb target, in CSS pixels, for a BASE_BUTTON-sized button.
++const TARGET_BUTTON_CSS_PX := 56.0
++const MAX_BOOST := 1.75
++## dpad (cell edge to 2 cells out) + right cluster must fit within this share of the width.
++const CLUSTER_WIDTH_UNITS := 154.0
++const MAX_WIDTH_SHARE := 0.9
 +
 +var _root: Node2D
 +var _buttons: Array[TouchButton] = []
++var _by_id: Dictionary = {}
 +var _touch_seen := false
 +var _gamepad_in_use := false
++var _layout_key := Vector4.ZERO
++var _run_lock := false
++var _portrait := false
++var _portrait_timer := 0.0
++var _paused_by_portrait := false
++var _muted_by_portrait := false
 +
 +
 +class TouchButton extends TouchScreenButton:
++	signal toggled(on: bool)
++
 +	const COLOR_FILL := Color(1, 1, 1, 0.20)
 +	const COLOR_FILL_HELD := Color(1, 1, 1, 0.45)
++	const COLOR_FILL_LATCHED := Color(1.0, 0.85, 0.2, 0.55)
 +	const COLOR_EDGE := Color(1, 1, 1, 0.65)
 +
 +	var label := ""
@@ -413,6 +442,12 @@ index 0000000..68204c7
 +	var round_shape := false
 +	var button_size := Vector2.ZERO
 +	var extra_actions: Array[StringName] = []
++	## Press-and-latch button (used by the run lock). Has no native action.
++	var toggle := false
++	var latched := false
++	## Extra actions in `keep_actions` are not released while keep_pressed returns true.
++	var keep_actions: Array[StringName] = []
++	var keep_pressed := Callable()
 +	var _held := false
 +
 +	func _ready() -> void:
@@ -423,11 +458,16 @@ index 0000000..68204c7
 +		_held = true
 +		for a in extra_actions:
 +			_send(a, true)
++		if toggle:
++			latched = not latched
++			toggled.emit(latched)
 +		queue_redraw()
 +
 +	func _on_released() -> void:
 +		_held = false
 +		for a in extra_actions:
++			if a in keep_actions and keep_pressed.is_valid() and keep_pressed.call():
++				continue
 +			_send(a, false)
 +		queue_redraw()
 +
@@ -444,6 +484,8 @@ index 0000000..68204c7
 +
 +	func _draw() -> void:
 +		var fill := COLOR_FILL_HELD if _held else COLOR_FILL
++		if toggle and latched:
++			fill = COLOR_FILL_LATCHED
 +		if round_shape:
 +			var r := button_size.x * 0.5
 +			draw_circle(Vector2.ZERO, r, fill)
@@ -471,29 +513,48 @@ index 0000000..68204c7
 +	_root = Node2D.new()
 +	add_child(_root)
 +	_build_buttons()
++	_layout()
 +	Input.joy_connection_changed.connect(_on_joy_connection_changed)
 +	_refresh()
 +
 +
++func _process(delta: float) -> void:
++	_check_layout()
++	if OS.has_feature("web"):
++		_portrait_timer -= delta
++		if _portrait_timer <= 0.0:
++			_portrait_timer = PORTRAIT_POLL_SECONDS
++			_set_portrait(_page_is_portrait())
++
++
 +func _build_buttons() -> void:
-+	# Coordinates are in the 256x240 game viewport.
-+	var dpad := Vector2(40, 192)
-+	_add(dpad + Vector2(0, -24), Vector2(24, 24), "", &"move_up_0", [&"ui_up"], true, Vector2.UP)
-+	_add(dpad + Vector2(0, 24), Vector2(24, 24), "", &"move_down_0", [&"ui_down"], true, Vector2.DOWN)
-+	_add(dpad + Vector2(-24, 0), Vector2(24, 24), "", &"move_left_0", [&"ui_left"], true, Vector2.LEFT)
-+	_add(dpad + Vector2(24, 0), Vector2(24, 24), "", &"move_right_0", [&"ui_right"], true, Vector2.RIGHT)
-+	# B = run / fire, A = jump (same pairs the keyboard binds to X and Z).
-+	_add(Vector2(194, 208), Vector2(32, 32), "B", &"run_0", [&"action_0", &"ui_back"], false, Vector2.ZERO, true)
-+	_add(Vector2(228, 194), Vector2(32, 32), "A", &"jump_0", [&"ui_accept"], false, Vector2.ZERO, true)
++	# Shapes are in base units (designed for 256x240); _layout() positions and
++	# scales the nodes, which scales their hit shapes with them.
++	_add(&"up", Vector2(24, 24), "", &"move_up_0", [&"ui_up"], true, Vector2.UP)
++	_add(&"down", Vector2(24, 24), "", &"move_down_0", [&"ui_down"], true, Vector2.DOWN)
++	_add(&"left", Vector2(24, 24), "", &"move_left_0", [&"ui_left"], true, Vector2.LEFT)
++	_add(&"right", Vector2(24, 24), "", &"move_right_0", [&"ui_right"], true, Vector2.RIGHT)
++	# B = run / fire, A = jump (same pairs the keyboard binds to X and Z). B's native
++	# action is fire; run is sent as an extra so the run lock can keep it held.
++	_add(&"b", Vector2(32, 32), "B", &"action_0", [&"run_0", &"ui_back"], false, Vector2.ZERO, true)
++	_add(&"a", Vector2(32, 32), "A", &"jump_0", [&"ui_accept"], false, Vector2.ZERO, true)
++	# Run lock ("shift lock"): tap to hold run on, tap again to release.
++	_add(&"lock", Vector2(26, 26), "LOCK", &"", [], false, Vector2.ZERO, true)
 +	# Select = reserve item drop, Start = pause.
-+	_add(Vector2(110, 226), Vector2(32, 14), "SEL", &"drop_item", [&"ui_select"])
-+	_add(Vector2(146, 226), Vector2(32, 14), "START", &"pause", [])
++	_add(&"select", Vector2(32, 14), "SEL", &"drop_item", [&"ui_select"])
++	_add(&"start", Vector2(32, 14), "START", &"pause", [])
++
++	var b: TouchButton = _by_id[&"b"]
++	b.keep_actions = [&"run_0"]
++	b.keep_pressed = func() -> bool: return _run_lock
++	var lock: TouchButton = _by_id[&"lock"]
++	lock.toggle = true
++	lock.toggled.connect(_set_run_lock)
 +
 +
-+func _add(pos: Vector2, size: Vector2, label: String, action: StringName,
++func _add(id: StringName, size: Vector2, label: String, action: StringName,
 +		extras: Array[StringName], passby := false, arrow := Vector2.ZERO, round_shape := false) -> void:
 +	var b := TouchButton.new()
-+	b.position = pos
 +	b.action = String(action)
 +	b.passby_press = passby # lets the thumb slide between D-pad directions
 +	b.visibility_mode = TouchScreenButton.VISIBILITY_ALWAYS
@@ -513,7 +574,113 @@ index 0000000..68204c7
 +		b.shape = rect
 +	_root.add_child(b)
 +	_buttons.append(b)
++	_by_id[id] = b
 +
++
++# --- Layout ------------------------------------------------------------------
++
++func _layout_signature() -> Vector4:
++	var vis := get_viewport().get_visible_rect().size
++	var win := Vector2(DisplayServer.window_get_size())
++	return Vector4(vis.x, vis.y, win.x, win.y)
++
++
++func _check_layout() -> void:
++	var key := _layout_signature()
++	if key != _layout_key:
++		_layout()
++
++
++## Scale factor applied to the base (256x240) layout.
++func _control_scale(vis_size: Vector2) -> float:
++	var u := vis_size.y / BASE_HEIGHT # keep proportions if the logical height isn't 240
++	var win := Vector2(DisplayServer.window_get_size())
++	var boost := 1.0
++	if win.x > 0.0 and win.y > 0.0 and vis_size.x > 0.0 and vis_size.y > 0.0:
++		# Physical pixels per viewport unit (letterboxed, so the smaller axis wins).
++		var px_per_unit := minf(win.x / vis_size.x, win.y / vis_size.y)
++		var dpr := maxf(1.0, DisplayServer.screen_get_scale())
++		var css_per_unit := px_per_unit / dpr
++		if css_per_unit > 0.0:
++			boost = clampf(TARGET_BUTTON_CSS_PX / (BASE_BUTTON * u * css_per_unit), 1.0, MAX_BOOST)
++	var k := u * boost
++	# Never let the two clusters collide on narrow views.
++	return minf(k, MAX_WIDTH_SHARE * vis_size.x / CLUSTER_WIDTH_UNITS)
++
++
++func _layout() -> void:
++	_layout_key = _layout_signature()
++	var vis := get_viewport().get_visible_rect()
++	var o := vis.position
++	var s := vis.size
++	var k := _control_scale(s)
++
++	var dpad := o + Vector2(40.0, 0.0) * k + Vector2(0.0, s.y - 48.0 * k)
++	var cell := 24.0 * k
++	_place(&"up", dpad + Vector2(0, -cell), k)
++	_place(&"down", dpad + Vector2(0, cell), k)
++	_place(&"left", dpad + Vector2(-cell, 0), k)
++	_place(&"right", dpad + Vector2(cell, 0), k)
++
++	_place(&"a", o + Vector2(s.x - 28.0 * k, s.y - 46.0 * k), k)
++	_place(&"b", o + Vector2(s.x - 62.0 * k, s.y - 32.0 * k), k)
++	_place(&"lock", o + Vector2(s.x - 62.0 * k, s.y - 68.0 * k), k)
++
++	_place(&"select", o + Vector2(s.x * 0.5 - 18.0 * k, s.y - 14.0 * k), k)
++	_place(&"start", o + Vector2(s.x * 0.5 + 18.0 * k, s.y - 14.0 * k), k)
++
++
++func _place(id: StringName, pos: Vector2, k: float) -> void:
++	var b: TouchButton = _by_id[id]
++	b.position = pos
++	b.scale = Vector2(k, k)
++
++
++# --- Run lock ----------------------------------------------------------------
++
++func _set_run_lock(on: bool) -> void:
++	if _run_lock == on:
++		return
++	_run_lock = on
++	var lock: TouchButton = _by_id[&"lock"]
++	if lock.latched != on:
++		lock.latched = on
++		lock.queue_redraw()
++	var b: TouchButton = _by_id[&"b"]
++	TouchButton._send(&"run_0", on or b._held)
++
++
++# --- Portrait ----------------------------------------------------------------
++
++func _page_is_portrait() -> bool:
++	var v: Variant = JavaScriptBridge.eval("window.smbPortrait === true", true)
++	return v == true
++
++
++func _set_portrait(on: bool) -> void:
++	if on == _portrait:
++		return
++	_portrait = on
++	if on:
++		for b in _buttons:
++			b.release_all()
++		if not get_tree().paused:
++			get_tree().paused = true
++			_paused_by_portrait = true
++		if not AudioServer.is_bus_mute(0):
++			AudioServer.set_bus_mute(0, true)
++			_muted_by_portrait = true
++	else:
++		if _paused_by_portrait:
++			get_tree().paused = false
++			_paused_by_portrait = false
++		if _muted_by_portrait:
++			AudioServer.set_bus_mute(0, false)
++			_muted_by_portrait = false
++	_refresh()
++
++
++# --- Visibility --------------------------------------------------------------
 +
 +func _input(event: InputEvent) -> void:
 +	if event is InputEventScreenTouch or event is InputEventScreenDrag:
@@ -535,6 +702,8 @@ index 0000000..68204c7
 +
 +
 +func _wants_controls() -> bool:
++	if _portrait:
++		return false
 +	if always_show:
 +		return true
 +	if not (OS.has_feature("web") or OS.has_feature("mobile")):
@@ -551,8 +720,236 @@ index 0000000..68204c7
 +	if not show_controls:
 +		for b in _buttons:
 +			b.release_all()
++		_set_run_lock(false)
 +	_root.visible = show_controls
 +	visible = show_controls
+diff --git a/Scripts/UI/WebImporter.gd b/Scripts/UI/WebImporter.gd
+new file mode 100644
+index 0000000..b1d8801
+--- /dev/null
++++ b/Scripts/UI/WebImporter.gd
+@@ -0,0 +1,221 @@
++class_name WebImporter
++extends Node
++## Imports resource packs and mods (.zip) from the browser (Web export only).
++##
++## The page (export_presets.cfg head_include) provides window.smbImporter: a modal
++## overlay whose "choose file" control is a real <input type="file"> the player
++## taps directly. That is what makes it work on iOS Safari, which only opens file
++## pickers from a genuine tap on the input, not from a Godot Button press.
++##
++## The chosen file stays in the page. We pull it across in base64 chunks (so big
++## zips never need one giant string), write it to a temp file in user://, then:
++##   pack: unzip into user://resource_packs/<name>/ (usable immediately)
++##   mod:  keep the zip in user://mods/ and reload the page (mods load at startup)
++
++signal pack_imported(pack_id: String)
++
++const MAX_BYTES := 96 * 1024 * 1024
++## Must match CH in the page script, and be a multiple of 3 so each chunk is clean base64.
++const CHUNK_BYTES := 393216
++const TMP_PATH := "user://import_tmp.zip"
++const MODS_DIR := "user://mods"
++
++var _callback: JavaScriptObject = null
++var _kind := ""
++var _busy := false
++
++
++## kind: "pack" or "mod"
++func start(kind: String) -> void:
++	if not OS.has_feature("web") or _busy:
++		return
++	_kind = kind
++	_callback = JavaScriptBridge.create_callback(_on_js_event)
++	JavaScriptBridge.get_interface("window").smbImportCallback = _callback
++	var title := "IMPORT RESOURCE PACK" if kind == "pack" else "IMPORT MOD"
++	var hint := "PICK A RESOURCE PACK .ZIP (WITH A pack_info.json)." if kind == "pack" \
++			else "PICK A MOD .ZIP. THE GAME RELOADS TO APPLY IT."
++	JavaScriptBridge.eval("window.smbImporter.prompt(%s, %s, %s, %d);" % [
++		JSON.stringify(kind), JSON.stringify(title), JSON.stringify(hint), MAX_BYTES], true)
++
++
++## Deletes every imported mod and reloads the page (recovery if a mod misbehaves).
++func remove_all_mods() -> void:
++	if not OS.has_feature("web"):
++		return
++	var removed := 0
++	for f in DirAccess.get_files_at(MODS_DIR):
++		if f.to_lower().ends_with(".zip"):
++			DirAccess.remove_absolute(MODS_DIR.path_join(f))
++			removed += 1
++	_callback = JavaScriptBridge.create_callback(_on_js_event)
++	JavaScriptBridge.get_interface("window").smbImportCallback = _callback
++	var msg := "REMOVED %d MOD%s. RELOADING..." % [removed, "" if removed == 1 else "S"]
++	_finish(true, msg, 1500)
++
++
++func _on_js_event(args: Array) -> void:
++	var evt := str(args[0]) if args.size() > 0 else ""
++	match evt:
++		"file":
++			_receive.call_deferred(str(args[2]), int(args[3]))
++		"cancel":
++			_busy = false
++		"error":
++			_busy = false
++			_play("bump")
++
++
++func _receive(file_name: String, size: int) -> void:
++	_busy = true
++	_status("READING FILE...")
++	var out := FileAccess.open(TMP_PATH, FileAccess.WRITE)
++	if out == null:
++		_finish(false, "COULD NOT WRITE TO BROWSER STORAGE.")
++		return
++	var chunks := ceili(float(size) / CHUNK_BYTES)
++	for i in chunks:
++		var b64: Variant = JavaScriptBridge.eval("window.smbImporter.chunk(%d)" % i, true)
++		if typeof(b64) != TYPE_STRING:
++			out.close()
++			_cleanup()
++			_finish(false, "COULD NOT READ THE FILE. TRY AGAIN.")
++			return
++		out.store_buffer(Marshalls.base64_to_raw(b64))
++		if i % 8 == 7:
++			_status("COPYING... %d%%" % int(100.0 * (i + 1) / chunks))
++			await get_tree().process_frame
++	out.close()
++	JavaScriptBridge.eval("window.smbImporter.release();", true)
++	_status("INSTALLING...")
++	await get_tree().process_frame
++
++	var result: Dictionary
++	if _kind == "mod":
++		result = install_mod(TMP_PATH, file_name)
++	else:
++		result = install_resource_pack(TMP_PATH, file_name)
++	_cleanup()
++
++	var ok: bool = result.get("ok", false)
++	var reload_ms := 0
++	if ok and _kind == "mod":
++		# Give the browser time to persist user:// to IndexedDB before reloading.
++		reload_ms = 1500 + int(size / 1048576.0 * 60.0)
++	_finish(ok, str(result.get("message", "")), reload_ms)
++	if ok and _kind == "pack":
++		pack_imported.emit(str(result.get("pack_id", "")))
++
++
++func _status(text: String) -> void:
++	JavaScriptBridge.eval("window.smbImporter.status(%s);" % JSON.stringify(text), true)
++
++
++func _finish(ok: bool, message: String, reload_ms := 0) -> void:
++	_busy = false
++	_play("coin" if ok else "bump")
++	JavaScriptBridge.eval("window.smbImporter.finish(%s, %s, %d);" % [
++		JSON.stringify(message), "true" if ok else "false", reload_ms], true)
++
++
++func _play(sfx: String) -> void:
++	AudioManager.play_global_sfx(sfx)
++
++
++func _cleanup() -> void:
++	if FileAccess.file_exists(TMP_PATH):
++		DirAccess.remove_absolute(TMP_PATH)
++
++
++static func _err(message: String) -> Dictionary:
++	return {"ok": false, "message": message}
++
++
++## Keeps letters, digits, space, dot, dash and underscore.
++static func _sanitize(text: String) -> String:
++	var out := ""
++	for ch in text:
++		var code := ch.unicode_at(0)
++		var keep := (code >= 48 and code <= 57) or (code >= 65 and code <= 90) \
++				or (code >= 97 and code <= 122) or ch in [" ", ".", "-", "_"]
++		out += ch if keep else "_"
++	return out.strip_edges().lstrip(".")
++
++
++static func install_resource_pack(zip_path: String, file_name: String) -> Dictionary:
++	var zip := ZIPReader.new()
++	if zip.open(zip_path) != OK:
++		return _err("NOT A VALID ZIP FILE.")
++	var files := zip.get_files()
++
++	# Find the shallowest pack_info.json: the pack is either at the zip root or
++	# inside one folder (the usual result of zipping a folder).
++	var info_path := ""
++	for f in files:
++		if f.begins_with("__MACOSX/") or f.get_file() != "pack_info.json":
++			continue
++		if info_path == "" or f.count("/") < info_path.count("/"):
++			info_path = f
++	if info_path == "":
++		zip.close()
++		return _err("NOT A RESOURCE PACK: NO pack_info.json FOUND.")
++
++	var prefix := info_path.get_base_dir() # "" when at the root
++	var pack_id := _sanitize(prefix.get_file() if prefix != "" else file_name.get_basename())
++	if pack_id == "" or pack_id == Global.ROM_PACK_NAME:
++		pack_id = "imported_pack"
++	var dest_root := Global.config_path.path_join("resource_packs").path_join(pack_id)
++	if DirAccess.dir_exists_absolute(dest_root):
++		Global.trash_or_delete(dest_root) # re-importing replaces the old copy
++
++	var written := 0
++	for f in files:
++		if f.ends_with("/") or f.begins_with("__MACOSX/") or f.get_file() == ".DS_Store":
++			continue
++		var rel := f
++		if prefix != "":
++			if not f.begins_with(prefix + "/"):
++				continue
++			rel = f.substr(prefix.length() + 1)
++		if rel == "" or rel.begins_with("/") or ".." in rel.split("/"):
++			continue # never write outside the pack folder
++		var dest := dest_root.path_join(rel)
++		DirAccess.make_dir_recursive_absolute(dest.get_base_dir())
++		var out := FileAccess.open(dest, FileAccess.WRITE)
++		if out == null:
++			zip.close()
++			return _err("COULD NOT WRITE " + rel.get_file().to_upper() + ".")
++		out.store_buffer(zip.read_file(f))
++		out.close()
++		written += 1
++	zip.close()
++
++	if written == 0:
++		return _err("THE PACK WAS EMPTY.")
++	return {"ok": true, "pack_id": pack_id,
++			"message": "ADDED PACK \"%s\" (%d FILES). SELECT IT IN THE LIST." % [pack_id.to_upper(), written]}
++
++
++static func install_mod(zip_path: String, file_name: String) -> Dictionary:
++	var zip := ZIPReader.new()
++	if zip.open(zip_path) != OK:
++		return _err("NOT A VALID ZIP FILE.")
++	var has_manifest := false
++	for f in zip.get_files():
++		if f.begins_with("mods-unpacked/") and f.get_file() == "manifest.json":
++			has_manifest = true
++			break
++	zip.close()
++	if not has_manifest:
++		return _err("NOT A MOD: NO mods-unpacked MANIFEST FOUND.")
++
++	var zip_name := _sanitize(file_name.get_file())
++	if not zip_name.to_lower().ends_with(".zip"):
++		zip_name += ".zip"
++	DirAccess.make_dir_recursive_absolute(MODS_DIR)
++	var dest := MODS_DIR.path_join(zip_name)
++	if FileAccess.file_exists(dest):
++		DirAccess.remove_absolute(dest)
++	if DirAccess.copy_absolute(zip_path, dest) != OK:
++		return _err("COULD NOT SAVE THE MOD.")
++	return {"ok": true, "message": "ADDED MOD \"%s\". RELOADING..." % zip_name.get_basename().to_upper()}
 diff --git a/Scripts/UI/WebRomPicker.gd b/Scripts/UI/WebRomPicker.gd
 new file mode 100644
 index 0000000..3eee48f
@@ -668,64 +1065,117 @@ index 0000000..3eee48f
 +			picker_cancelled.emit()
 diff --git a/WEB_BUILD.md b/WEB_BUILD.md
 new file mode 100644
-index 0000000..7011b2a
+index 0000000..c8efc72
 --- /dev/null
 +++ b/WEB_BUILD.md
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,29 @@
 +# Web (iOS Safari) build
 +
 +Build: run the **web build** workflow from the GitHub Actions tab (works from a phone). Download the `web` artifact, or tick *deploy_pages* to publish to GitHub Pages. Locally: `godot --headless --export-release "Web" build/web/index.html`.
 +
 +First launch: tap **BROWSE FILES...**, pick your vanilla SMB1 `.nes` from the Files app. The ROM and generated assets are stored in the browser's IndexedDB (`user://`); keep the site added to the Home Screen so iOS doesn't evict storage.
 +
-+Touch controls show automatically on touch devices and hide while a gamepad is connected or used. Set `always_show` on the `TouchControls` autoload to test on desktop.
++## Touch controls
 +
-+Notes: single-threaded export (no SharedArrayBuffer/COOP/COEP needed); GDExtensions (Discord RPC, godotgif) and mod loading are disabled on Web.
++Shown automatically on touch devices and hidden while a gamepad is connected or used. They are laid out from the real visible area, so they stay at the screen edges and keep a thumb-friendly size for every **Size** setting, window shape and per-level resolution. Set `always_show` on the `TouchControls` autoload to test on desktop.
++
++**LOCK** (above B) is the run lock ("shift lock"): tap once to hold run on, tap again to release. B still fires fireballs while locked.
++
++## Portrait mode
++
++On phones/tablets held upright the page shows a "please rotate your device" screen, and the game is paused and muted until the device is in landscape. Desktop browsers are never blocked.
++
++## Importing resource packs and mods
++
++Settings > Resource Packs:
++
++- **IMPORT PACK (.ZIP)**: pick a resource pack zip (it must contain a `pack_info.json`, at the root or inside one folder). It is unpacked into the browser's storage and shows up in the list straight away.
++- **IMPORT MOD (.ZIP)**: pick a mod zip (a Godot Mod Loader zip with a `mods-unpacked/<Mod>/manifest.json`). The zip is stored and the page reloads, because mods load at startup.
++- **REMOVE ALL MODS**: press twice; deletes every imported mod and reloads.
++
++Safe mode: if an imported mod stops the game from starting, open the site with `?nomods` on the end of the address (e.g. `https://you.github.io/repo/?nomods`), then use REMOVE ALL MODS.
++
++Files up to 96 MB are accepted. Mods are not loaded at all until you import one.
++
++Notes: single-threaded export (no SharedArrayBuffer/COOP/COEP needed); GDExtensions (Discord RPC, godotgif) are disabled on Web.
 diff --git a/addons/mod_loader/mod_loader.gd b/addons/mod_loader/mod_loader.gd
-index 5ce020f..cec8f48 100644
+index 5ce020f..aada591 100644
 --- a/addons/mod_loader/mod_loader.gd
 +++ b/addons/mod_loader/mod_loader.gd
-@@ -32,6 +32,9 @@ const LOG_NAME := "ModLoader"
+@@ -32,6 +32,10 @@ const LOG_NAME := "ModLoader"
  
  
  func _init() -> void:
-+	if OS.has_feature("web"):
-+		return # mods are unsupported on Web
++	# Web: only runs when mods were imported (see ModLoaderStore._init).
++	if OS.has_feature("web") and not ModLoaderStore.ml_options.enable_mods:
++		return
 +
  	# if mods are not enabled - don't load mods
  	if ModLoaderStore.REQUIRE_CMD_LINE and not _ModLoaderCLI.is_running_with_command_line_arg("--enable-mods"):
  		return
+@@ -210,6 +214,9 @@ func _init() -> void:
+ 
+ 
+ func _ready():
++	if OS.has_feature("web"):
++		return # the mod hook packer writes a zip next to the executable; no such place on Web
++
+ 	# Hooks must be generated after all autoloads are available.
+ 	# Variables initialized with an autoload property cause errors otherwise.
+ 	if _ModLoaderHooks.any_mod_hooked:
 diff --git a/addons/mod_loader/mod_loader_store.gd b/addons/mod_loader/mod_loader_store.gd
-index c3640b4..e2d9c12 100644
+index c3640b4..c4a999c 100644
 --- a/addons/mod_loader/mod_loader_store.gd
 +++ b/addons/mod_loader/mod_loader_store.gd
-@@ -117,6 +117,12 @@ var has_feature := {
+@@ -117,14 +117,43 @@ var has_feature := {
  # =============================================================================
  
  func _init():
-+	# Mods are not supported on Web (no mods folder, and the log/cache file
-+	# writes crash the iOS Safari build at startup), so stay inert there.
-+	if OS.has_feature("web"):
-+		ml_options = ModLoaderOptionsProfile.new()
-+		ml_options.enable_mods = false
-+		return
++	# Web: stay inert (as before) unless the player imported mods from Settings.
++	# The loader writes to user://logs and user://mods, which don't exist on a
++	# fresh browser profile, so create them before anything is logged.
++	var web := OS.has_feature("web")
++	if web:
++		if not _web_should_load_mods():
++			ml_options = ModLoaderOptionsProfile.new()
++			ml_options.enable_mods = false
++			return
++		DirAccess.make_dir_recursive_absolute("user://logs")
++		DirAccess.make_dir_recursive_absolute("user://mods")
  	_update_ml_options_from_options_resource()
  	_update_ml_options_from_cli_args()
++	if web:
++		# The options resource has a "web" override that turns mods off; imported
++		# mods are the one case where we want them on.
++		ml_options.enable_mods = true
  	_configure_logger()
-@@ -125,6 +131,8 @@ func _init():
+ 	# ModLoaderStore is passed as argument so the cache data can be loaded on _init()
+ 	_ModLoaderCache.init_cache(self)
  
  
++## Web: true when mod zips were imported into user://mods, unless the page was
++## opened with ?nomods (safe mode, in case an imported mod breaks startup).
++func _web_should_load_mods() -> bool:
++	var query = JavaScriptBridge.eval("window.location.search", true)
++	if query is String and "nomods" in query:
++		return false
++	for file_name in DirAccess.get_files_at("user://mods"):
++		if file_name.to_lower().ends_with(".zip"):
++			return true
++	return false
++
++
  func _exit_tree() -> void:
-+	if OS.has_feature("web"):
++	if OS.has_feature("web") and not ml_options.enable_mods:
 +		return
  	# Save the cache to the cache file.
  	_ModLoaderCache.save_to_file()
  
 diff --git a/export_presets.cfg b/export_presets.cfg
-index 2d2877f..4f2da10 100644
+index 2d2877f..45d1cc9 100644
 --- a/export_presets.cfg
 +++ b/export_presets.cfg
-@@ -122,3 +122,97 @@ rm -rf \"{temp_dir}\""
+@@ -122,3 +122,240 @@ rm -rf \"{temp_dir}\""
  dotnet/include_scripts_content=false
  dotnet/include_debug_symbols=true
  dotnet/embed_build_outputs=false
@@ -809,6 +1259,149 @@ index 2d2877f..4f2da10 100644
 +  window.addEventListener('error', function (e) { push('E', [e.message + ' @' + e.filename + ':' + e.lineno]); show(); });
 +  window.addEventListener('unhandledrejection', function (e) { push('E', ['promise: ' + fmt(e.reason)]); show(); });
 +  if (location.search.indexOf('debug') >= 0) { document.addEventListener('DOMContentLoaded', show); }
++})();
++</script>
++<style>
++#smb-rotate, #smb-import { position: fixed; left: 0; top: 0; right: 0; bottom: 0; display: none; align-items: center; justify-content: center; flex-direction: column; box-sizing: border-box; padding: 24px; text-align: center; color: #fff; font: bold 14px/1.6 monospace; text-transform: uppercase; letter-spacing: 1px; -webkit-user-select: none; user-select: none; }
++#smb-rotate { z-index: 100001; background: #000; touch-action: none; }
++#smb-import { z-index: 100000; background: rgba(0, 0, 0, 0.82); }
++html.smb-portrait canvas { visibility: hidden; }
++#smb-rotate .ico { width: 56px; height: 92px; margin: 0 auto 26px; border: 4px solid #fff; border-radius: 10px; box-sizing: border-box; animation: smb-rot 2.4s ease-in-out infinite; }
++@keyframes smb-rot { 0%, 20% { transform: rotate(0deg); } 60%, 100% { transform: rotate(-90deg); } }
++#smb-rotate .big { font-size: 18px; margin-bottom: 10px; }
++#smb-rotate .small { font-size: 11px; opacity: 0.65; max-width: 280px; }
++#smb-card { width: 100%; max-width: 360px; padding: 18px 16px; background: #111; border: 3px solid #fff; border-radius: 6px; box-sizing: border-box; }
++#smb-title { font-size: 16px; margin-bottom: 8px; }
++#smb-msg { font-size: 11px; opacity: 0.85; margin-bottom: 14px; min-height: 18px; }
++.smb-btn { position: relative; display: block; margin: 8px 0 0; padding: 14px 8px; background: #fff; color: #000; border-radius: 4px; overflow: hidden; cursor: pointer; }
++.smb-btn.sec { background: #333; color: #fff; }
++.smb-btn input { position: absolute; left: 0; top: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; font-size: 200px; }
++</style>
++<script>
++(function () {
++  var ready = false, rot = null, ov = null, ttl = null, msg = null, pick = null, fileIn = null, ok = null, cancel = null;
++  var st = { kind: '', buf: null, len: 0, max: 0, reload: 0 };
++  var CH = 393216;
++
++  function isTouchDevice() {
++    var coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
++    var ua = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || '');
++    var ipadOs = (navigator.platform === 'MacIntel') && (navigator.maxTouchPoints || 0) > 1;
++    return !!(coarse || ua || ipadOs);
++  }
++  function updatePortrait() {
++    var p = isTouchDevice() && window.innerHeight > window.innerWidth;
++    window.smbPortrait = p;
++    document.documentElement.classList.toggle('smb-portrait', p);
++    if (rot) { rot.style.display = p ? 'flex' : 'none'; }
++  }
++
++  function notify(evt, name, extra) {
++    var cb = window.smbImportCallback;
++    if (typeof cb === 'function') { cb(evt, st.kind, name || '', extra === undefined ? '' : extra); }
++  }
++  function show(busy) {
++    ov.style.display = 'flex';
++    pick.style.display = busy ? 'none' : 'block';
++    cancel.style.display = busy ? 'none' : 'block';
++    ok.style.display = 'none';
++  }
++  function hide() { if (ov) { ov.style.display = 'none'; } }
++  function release() { st.buf = null; st.len = 0; }
++
++  function build() {
++    if (ready || !document.body) { return; }
++    ready = true;
++    rot = document.createElement('div');
++    rot.id = 'smb-rotate';
++    rot.innerHTML = '<div class=\"ico\"></div><div class=\"big\">Please rotate your device</div><div class=\"small\">This game is played in landscape. If nothing happens, turn off orientation lock.</div>';
++    document.body.appendChild(rot);
++    ov = document.createElement('div');
++    ov.id = 'smb-import';
++    ov.innerHTML = '<div id=\"smb-card\"><div id=\"smb-title\"></div><div id=\"smb-msg\"></div>' +
++      '<div class=\"smb-btn\" id=\"smb-pick\">Choose .zip file<input id=\"smb-file\" type=\"file\" accept=\".zip,application/zip,application/x-zip-compressed\"></div>' +
++      '<div class=\"smb-btn\" id=\"smb-ok\">OK</div>' +
++      '<div class=\"smb-btn sec\" id=\"smb-cancel\">Cancel</div></div>';
++    document.body.appendChild(ov);
++    ttl = document.getElementById('smb-title');
++    msg = document.getElementById('smb-msg');
++    pick = document.getElementById('smb-pick');
++    fileIn = document.getElementById('smb-file');
++    ok = document.getElementById('smb-ok');
++    cancel = document.getElementById('smb-cancel');
++
++    cancel.addEventListener('click', function () { hide(); notify('cancel'); });
++    ok.addEventListener('click', function () { hide(); });
++    fileIn.addEventListener('cancel', function () { hide(); notify('cancel'); });
++    fileIn.addEventListener('change', function () {
++      var f = fileIn.files && fileIn.files[0];
++      if (!f) { return; }
++      if (f.size > st.max) {
++        fileIn.value = '';
++        msg.textContent = 'That file is too large (max ' + Math.floor(st.max / 1048576) + ' MB).';
++        notify('error', f.name, 'too_large');
++        return;
++      }
++      show(true);
++      msg.textContent = 'Reading file...';
++      var reader = new FileReader();
++      reader.onerror = function () {
++        show(false);
++        msg.textContent = 'Could not read that file.';
++        notify('error', f.name, 'read_error');
++      };
++      reader.onload = function () {
++        st.buf = reader.result;
++        st.len = reader.result.byteLength;
++        fileIn.value = '';
++        notify('file', f.name, st.len);
++      };
++      reader.readAsArrayBuffer(f);
++    });
++    updatePortrait();
++  }
++
++  window.smbImporter = {
++    prompt: function (kind, title, hint, maxBytes) {
++      build();
++      if (!ov) { return; }
++      st.kind = kind; st.max = maxBytes || 0;
++      ttl.textContent = title;
++      msg.textContent = hint;
++      show(false);
++    },
++    status: function (text) { if (ov) { show(true); msg.textContent = text; } },
++    finish: function (text, success, reloadMs) {
++      build();
++      if (!ov) { return; }
++      ov.style.display = 'flex';
++      pick.style.display = 'none';
++      cancel.style.display = 'none';
++      msg.textContent = text;
++      if (reloadMs > 0) {
++        ok.style.display = 'none';
++        setTimeout(function () { window.location.reload(); }, reloadMs);
++      } else {
++        ok.style.display = 'block';
++      }
++    },
++    chunk: function (i) {
++      if (!st.buf) { return null; }
++      var s = i * CH, e = Math.min(s + CH, st.len);
++      var bytes = new Uint8Array(st.buf, s, e - s);
++      var bin = '';
++      for (var j = 0; j < bytes.length; j += 0x2000) {
++        bin += String.fromCharCode.apply(null, bytes.subarray(j, Math.min(j + 0x2000, bytes.length)));
++      }
++      return btoa(bin);
++    },
++    release: release
++  };
++
++  window.addEventListener('resize', updatePortrait);
++  window.addEventListener('orientationchange', function () { updatePortrait(); setTimeout(updatePortrait, 150); setTimeout(updatePortrait, 500); });
++  document.addEventListener('DOMContentLoaded', build);
++  updatePortrait();
 +})();
 +</script>"
 +html/canvas_resize_policy=2

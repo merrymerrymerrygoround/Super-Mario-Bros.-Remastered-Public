@@ -140,7 +140,7 @@ index 27894d2..11cfc17 100644
  	var track: int = animation.find_track("AudioStreamPlayer", Animation.TYPE_AUDIO)
  	for key in animation.track_get_key_count(track):
 diff --git a/Scripts/Parts/ResourcePackLoader.gd b/Scripts/Parts/ResourcePackLoader.gd
-index 10ea6d1..8e5d434 100644
+index 10ea6d1..901f18d 100644
 --- a/Scripts/Parts/ResourcePackLoader.gd
 +++ b/Scripts/Parts/ResourcePackLoader.gd
 @@ -1,14 +1,26 @@
@@ -151,7 +151,7 @@ index 10ea6d1..8e5d434 100644
  var resource_packs := []
  var containers := []
  
-+## Web only: browser file import (see WebImporter).
++## Web only: browser file browser for packs and mods (see WebImporter).
 +var importer: WebImporter = null
 +var remove_mods_row = null # SelectableOptionButton
 +var remove_mods_armed := false
@@ -162,10 +162,10 @@ index 10ea6d1..8e5d434 100644
 +	if OS.has_feature("web"):
 +		setup_web_import()
  
-+## Web has no file manager, so "open folder" becomes "import a pack".
++## Web has no file manager, so "open folder" opens the in-page file browser.
  func open_folder() -> void:
 +	if OS.has_feature("web"):
-+		importer.start("pack")
++		importer.open("resource_packs")
 +		return
  	OS.shell_show_in_file_manager(ProjectSettings.globalize_path(Global.config_path.path_join("resource_packs")), true)
  
@@ -174,19 +174,19 @@ index 10ea6d1..8e5d434 100644
  		if FileAccess.file_exists(pack_info_path) and i != Global.ROM_PACK_NAME:
  			create_container(Global.config_path.path_join("resource_packs/" + i))
  
-+## Web: repurpose the "open folder" row to import a pack and add mod rows under it.
++## Web: repurpose the "open folder" row to browse packs and add mod rows under it.
 +func setup_web_import() -> void:
 +	importer = WebImporter.new()
 +	add_child(importer)
-+	importer.pack_imported.connect(func(_id: String) -> void: get_resource_packs())
++	importer.packs_changed.connect(get_resource_packs)
 +
 +	var rows: Node = $"../VBoxContainer"
 +	var open_row = rows.get_node_or_null("SelectableOptionNode")
 +	if open_row:
-+		open_row.title = "IMPORT PACK (.ZIP)"
++		open_row.title = "BROWSE RESOURCE PACKS"
 +
-+	var import_mod = add_web_row(rows, "IMPORT MOD (.ZIP)", 3)
-+	import_mod.button_pressed.connect(func() -> void: importer.start("mod"))
++	var browse_mods = add_web_row(rows, "BROWSE MODS", 3)
++	browse_mods.button_pressed.connect(func() -> void: importer.open("mods"))
 +	remove_mods_row = add_web_row(rows, "REMOVE ALL MODS", 4)
 +	remove_mods_row.button_pressed.connect(on_remove_mods_pressed)
 +
@@ -1124,49 +1124,58 @@ index 0000000..fdc0142
 +	row.button_pressed.connect(TouchControls.begin_layout_edit)
 diff --git a/Scripts/UI/WebImporter.gd b/Scripts/UI/WebImporter.gd
 new file mode 100644
-index 0000000..b1d8801
+index 0000000..312c8b5
 --- /dev/null
 +++ b/Scripts/UI/WebImporter.gd
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,337 @@
 +class_name WebImporter
 +extends Node
-+## Imports resource packs and mods (.zip) from the browser (Web export only).
++## File browser for resource packs and mods (Web export only).
 +##
-+## The page (export_presets.cfg head_include) provides window.smbImporter: a modal
-+## overlay whose "choose file" control is a real <input type="file"> the player
-+## taps directly. That is what makes it work on iOS Safari, which only opens file
-+## pickers from a genuine tap on the input, not from a Godot Button press.
++## The page (export_presets.cfg head_include) provides window.smbImporter: a modal file
++## browser drawn in HTML on top of the game (path bar, Refresh, Import file..., and an
++## actions menu per item). Godot owns the files; the page only asks for things through
++## window.smbImportCallback, and Godot answers by calling back into window.smbImporter:
++##   "list"   (dir)             -> setListing: show a folder
++##   "file"   (dir, name, size) -> import the picked .zip into that folder
++##   "delete" (dir, name)       -> delete an item
++##   "close"                    -> the player left the browser
 +##
-+## The chosen file stays in the page. We pull it across in base64 chunks (so big
-+## zips never need one giant string), write it to a temp file in user://, then:
-+##   pack: unzip into user://resource_packs/<name>/ (usable immediately)
-+##   mod:  keep the zip in user://mods/ and reload the page (mods load at startup)
++## It is HTML (not Godot controls) because iOS Safari only opens a file chooser from a
++## genuine tap on the page, never from a Godot Button press.
++##
++## Folders: "" (the root, listing the two below), "mods" (zips kept in user://mods) and
++## "resource_packs" (one folder per pack). Mods load at startup, so any mod change
++## reloads the page when the player leaves the browser.
++##
++## A picked file stays in the page. We pull it across in base64 chunks (so big zips never
++## need one giant string), write it to a temp file in user://, then install it.
 +
-+signal pack_imported(pack_id: String)
++signal packs_changed
 +
 +const MAX_BYTES := 96 * 1024 * 1024
 +## Must match CH in the page script, and be a multiple of 3 so each chunk is clean base64.
 +const CHUNK_BYTES := 393216
 +const TMP_PATH := "user://import_tmp.zip"
 +const MODS_DIR := "user://mods"
++const ROOT_DIRS := ["mods", "resource_packs"]
 +
 +var _callback: JavaScriptObject = null
-+var _kind := ""
 +var _busy := false
++## Milliseconds to wait before reloading when the browser closes (0 = no reload needed).
++var _reload_ms := 0
 +
 +
-+## kind: "pack" or "mod"
-+func start(kind: String) -> void:
++## dir: "" (root), "mods" or "resource_packs"
++func open(dir := "") -> void:
 +	if not OS.has_feature("web") or _busy:
 +		return
-+	_kind = kind
-+	_callback = JavaScriptBridge.create_callback(_on_js_event)
-+	JavaScriptBridge.get_interface("window").smbImportCallback = _callback
-+	var title := "IMPORT RESOURCE PACK" if kind == "pack" else "IMPORT MOD"
-+	var hint := "PICK A RESOURCE PACK .ZIP (WITH A pack_info.json)." if kind == "pack" \
-+			else "PICK A MOD .ZIP. THE GAME RELOADS TO APPLY IT."
-+	JavaScriptBridge.eval("window.smbImporter.prompt(%s, %s, %s, %d);" % [
-+		JSON.stringify(kind), JSON.stringify(title), JSON.stringify(hint), MAX_BYTES], true)
++	DirAccess.make_dir_recursive_absolute(MODS_DIR)
++	DirAccess.make_dir_recursive_absolute(_packs_dir())
++	_connect()
++	var shown := dir if dir in ROOT_DIRS else ""
++	JavaScriptBridge.eval("window.smbImporter.open(%s, %s, %d);" % [
++		JSON.stringify(shown), JSON.stringify(_listing(shown)), MAX_BYTES], true)
 +
 +
 +## Deletes every imported mod and reloads the page (recovery if a mod misbehaves).
@@ -1178,30 +1187,99 @@ index 0000000..b1d8801
 +		if f.to_lower().ends_with(".zip"):
 +			DirAccess.remove_absolute(MODS_DIR.path_join(f))
 +			removed += 1
-+	_callback = JavaScriptBridge.create_callback(_on_js_event)
-+	JavaScriptBridge.get_interface("window").smbImportCallback = _callback
-+	var msg := "REMOVED %d MOD%s. RELOADING..." % [removed, "" if removed == 1 else "S"]
++	_connect()
++	var msg := "Removed %d mod%s. Reloading..." % [removed, "" if removed == 1 else "s"]
 +	_finish(true, msg, 1500)
++
++
++func _connect() -> void:
++	if _callback == null:
++		_callback = JavaScriptBridge.create_callback(_on_js_event)
++	JavaScriptBridge.get_interface("window").smbImportCallback = _callback
 +
 +
 +func _on_js_event(args: Array) -> void:
 +	var evt := str(args[0]) if args.size() > 0 else ""
++	var dir := str(args[1]) if args.size() > 1 else ""
++	var item := str(args[2]) if args.size() > 2 else ""
++	if _busy and evt != "error":
++		return
 +	match evt:
++		"list":
++			_show_dir.call_deferred(dir)
 +		"file":
-+			_receive.call_deferred(str(args[2]), int(args[3]))
-+		"cancel":
-+			_busy = false
++			_receive.call_deferred(dir, item, int(args[3]))
++		"delete":
++			_delete.call_deferred(dir, item)
++		"close":
++			_closed.call_deferred()
 +		"error":
-+			_busy = false
 +			_play("bump")
 +
 +
-+func _receive(file_name: String, size: int) -> void:
++# --- Listing -----------------------------------------------------------------
++
++func _packs_dir() -> String:
++	return Global.config_path.path_join("resource_packs")
++
++
++## Items for the page: {"n": name, "t": "dir" | "zip" | "pack", "s": size in bytes}.
++func _listing(dir: String) -> Array:
++	var items := []
++	match dir:
++		"":
++			for d in ROOT_DIRS:
++				items.append({"n": d, "t": "dir"})
++		"mods":
++			var files := DirAccess.get_files_at(MODS_DIR)
++			files.sort()
++			for f in files:
++				if f.to_lower().ends_with(".zip"):
++					items.append({"n": f, "t": "zip", "s": _file_size(MODS_DIR.path_join(f))})
++		"resource_packs":
++			var dirs := DirAccess.get_directories_at(_packs_dir())
++			dirs.sort()
++			for d in dirs:
++				if d != Global.ROM_PACK_NAME: # the generated base assets are not a user pack
++					items.append({"n": d, "t": "pack", "s": _dir_size(_packs_dir().path_join(d))})
++	return items
++
++
++func _file_size(path: String) -> int:
++	var f := FileAccess.open(path, FileAccess.READ)
++	return f.get_length() if f != null else 0
++
++
++func _dir_size(path: String) -> int:
++	var total := 0
++	for f in DirAccess.get_files_at(path):
++		total += _file_size(path.path_join(f))
++	for d in DirAccess.get_directories_at(path):
++		total += _dir_size(path.path_join(d))
++	return total
++
++
++func _show_dir(dir: String) -> void:
++	_push_listing(dir if dir in ROOT_DIRS else "", "", true)
++
++
++func _push_listing(dir: String, message: String, ok: bool) -> void:
++	JavaScriptBridge.eval("window.smbImporter.setListing(%s, %s, %s, %s);" % [
++		JSON.stringify(dir), JSON.stringify(_listing(dir)), JSON.stringify(message),
++		"true" if ok else "false"], true)
++
++
++# --- Import ------------------------------------------------------------------
++
++func _receive(dir: String, file_name: String, size: int) -> void:
++	if not dir in ROOT_DIRS:
++		_push_listing("", "Open the mods or resource_packs folder first.", false)
++		return
 +	_busy = true
-+	_status("READING FILE...")
++	_status("Reading file...")
 +	var out := FileAccess.open(TMP_PATH, FileAccess.WRITE)
 +	if out == null:
-+		_finish(false, "COULD NOT WRITE TO BROWSER STORAGE.")
++		_fail(dir, "Could not write to browser storage.")
 +		return
 +	var chunks := ceili(float(size) / CHUNK_BYTES)
 +	for i in chunks:
@@ -1209,33 +1287,71 @@ index 0000000..b1d8801
 +		if typeof(b64) != TYPE_STRING:
 +			out.close()
 +			_cleanup()
-+			_finish(false, "COULD NOT READ THE FILE. TRY AGAIN.")
++			_fail(dir, "Could not read the file. Try again.")
 +			return
 +		out.store_buffer(Marshalls.base64_to_raw(b64))
 +		if i % 8 == 7:
-+			_status("COPYING... %d%%" % int(100.0 * (i + 1) / chunks))
++			_status("Copying... %d%%" % int(100.0 * (i + 1) / chunks))
 +			await get_tree().process_frame
 +	out.close()
 +	JavaScriptBridge.eval("window.smbImporter.release();", true)
-+	_status("INSTALLING...")
++	_status("Installing...")
 +	await get_tree().process_frame
 +
 +	var result: Dictionary
-+	if _kind == "mod":
++	if dir == "mods":
 +		result = install_mod(TMP_PATH, file_name)
 +	else:
 +		result = install_resource_pack(TMP_PATH, file_name)
 +	_cleanup()
 +
 +	var ok: bool = result.get("ok", false)
-+	var reload_ms := 0
-+	if ok and _kind == "mod":
++	if ok and dir == "mods":
 +		# Give the browser time to persist user:// to IndexedDB before reloading.
-+		reload_ms = 1500 + int(size / 1048576.0 * 60.0)
-+	_finish(ok, str(result.get("message", "")), reload_ms)
-+	if ok and _kind == "pack":
-+		pack_imported.emit(str(result.get("pack_id", "")))
++		_reload_ms = maxi(_reload_ms, 1500 + int(size / 1048576.0 * 60.0))
++	_busy = false
++	_play("coin" if ok else "bump")
++	_push_listing(dir, str(result.get("message", "")), ok)
++	if ok and dir == "resource_packs":
++		packs_changed.emit()
 +
++
++func _fail(dir: String, message: String) -> void:
++	_busy = false
++	_play("bump")
++	_push_listing(dir, message, false)
++
++
++# --- Delete ------------------------------------------------------------------
++
++func _delete(dir: String, item: String) -> void:
++	# Only plain names that are really in the folder; never a path.
++	var known := false
++	for entry in _listing(dir):
++		if entry["n"] == item and entry["t"] != "dir":
++			known = true
++	if not known or item.get_file() != item:
++		_push_listing(dir, "That item is not there any more.", false)
++		return
++	if dir == "mods":
++		DirAccess.remove_absolute(MODS_DIR.path_join(item))
++		_reload_ms = maxi(_reload_ms, 1500)
++		_push_listing(dir, "Removed \"%s\". It unloads when the game reloads." % item, true)
++	else:
++		Global.trash_or_delete(_packs_dir().path_join(item))
++		_push_listing(dir, "Removed pack \"%s\"." % item, true)
++		packs_changed.emit()
++	_play("coin")
++
++
++func _closed() -> void:
++	if _reload_ms > 0:
++		var ms := _reload_ms
++		_reload_ms = 0
++		_finish(true, "Reloading to apply mod changes...", ms)
++
++
++# --- Helpers -----------------------------------------------------------------
 +
 +func _status(text: String) -> void:
 +	JavaScriptBridge.eval("window.smbImporter.status(%s);" % JSON.stringify(text), true)
@@ -1275,7 +1391,7 @@ index 0000000..b1d8801
 +static func install_resource_pack(zip_path: String, file_name: String) -> Dictionary:
 +	var zip := ZIPReader.new()
 +	if zip.open(zip_path) != OK:
-+		return _err("NOT A VALID ZIP FILE.")
++		return _err("Not a valid zip file.")
 +	var files := zip.get_files()
 +
 +	# Find the shallowest pack_info.json: the pack is either at the zip root or
@@ -1288,13 +1404,13 @@ index 0000000..b1d8801
 +			info_path = f
 +	if info_path == "":
 +		zip.close()
-+		return _err("NOT A RESOURCE PACK: NO pack_info.json FOUND.")
++		return _err("Not a resource pack: no pack_info.json found.")
 +
 +	var prefix := info_path.get_base_dir() # "" when at the root
 +	var pack_id := _sanitize(prefix.get_file() if prefix != "" else file_name.get_basename())
 +	if pack_id == "" or pack_id == Global.ROM_PACK_NAME:
 +		pack_id = "imported_pack"
-+	var dest_root := Global.config_path.path_join("resource_packs").path_join(pack_id)
++	var dest_root: String = Global.config_path.path_join("resource_packs").path_join(pack_id)
 +	if DirAccess.dir_exists_absolute(dest_root):
 +		Global.trash_or_delete(dest_root) # re-importing replaces the old copy
 +
@@ -1309,27 +1425,27 @@ index 0000000..b1d8801
 +			rel = f.substr(prefix.length() + 1)
 +		if rel == "" or rel.begins_with("/") or ".." in rel.split("/"):
 +			continue # never write outside the pack folder
-+		var dest := dest_root.path_join(rel)
++		var dest: String = dest_root.path_join(rel)
 +		DirAccess.make_dir_recursive_absolute(dest.get_base_dir())
 +		var out := FileAccess.open(dest, FileAccess.WRITE)
 +		if out == null:
 +			zip.close()
-+			return _err("COULD NOT WRITE " + rel.get_file().to_upper() + ".")
++			return _err("Could not write " + rel.get_file() + ".")
 +		out.store_buffer(zip.read_file(f))
 +		out.close()
 +		written += 1
 +	zip.close()
 +
 +	if written == 0:
-+		return _err("THE PACK WAS EMPTY.")
++		return _err("The pack was empty.")
 +	return {"ok": true, "pack_id": pack_id,
-+			"message": "ADDED PACK \"%s\" (%d FILES). SELECT IT IN THE LIST." % [pack_id.to_upper(), written]}
++			"message": "Added pack \"%s\" (%d files)." % [pack_id, written]}
 +
 +
 +static func install_mod(zip_path: String, file_name: String) -> Dictionary:
 +	var zip := ZIPReader.new()
 +	if zip.open(zip_path) != OK:
-+		return _err("NOT A VALID ZIP FILE.")
++		return _err("Not a valid zip file.")
 +	var has_manifest := false
 +	for f in zip.get_files():
 +		if f.begins_with("mods-unpacked/") and f.get_file() == "manifest.json":
@@ -1337,7 +1453,7 @@ index 0000000..b1d8801
 +			break
 +	zip.close()
 +	if not has_manifest:
-+		return _err("NOT A MOD: NO mods-unpacked MANIFEST FOUND.")
++		return _err("Not a mod: no mods-unpacked manifest found.")
 +
 +	var zip_name := _sanitize(file_name.get_file())
 +	if not zip_name.to_lower().ends_with(".zip"):
@@ -1347,8 +1463,8 @@ index 0000000..b1d8801
 +	if FileAccess.file_exists(dest):
 +		DirAccess.remove_absolute(dest)
 +	if DirAccess.copy_absolute(zip_path, dest) != OK:
-+		return _err("COULD NOT SAVE THE MOD.")
-+	return {"ok": true, "message": "ADDED MOD \"%s\". RELOADING..." % zip_name.get_basename().to_upper()}
++		return _err("Could not save the mod.")
++	return {"ok": true, "message": "Added mod \"%s\". It loads when the game reloads." % zip_name}
 diff --git a/Scripts/UI/WebRomPicker.gd b/Scripts/UI/WebRomPicker.gd
 new file mode 100644
 index 0000000..3eee48f
@@ -1464,10 +1580,10 @@ index 0000000..3eee48f
 +			picker_cancelled.emit()
 diff --git a/WEB_BUILD.md b/WEB_BUILD.md
 new file mode 100644
-index 0000000..c8efc72
+index 0000000..95736f8
 --- /dev/null
 +++ b/WEB_BUILD.md
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,33 @@
 +# Web (iOS Safari) build
 +
 +Build: run the **web build** workflow from the GitHub Actions tab (works from a phone). Download the `web` artifact, or tick *deploy_pages* to publish to GitHub Pages. Locally: `godot --headless --export-release "Web" build/web/index.html`.
@@ -1488,11 +1604,13 @@ index 0000000..c8efc72
 +
 +## Importing resource packs and mods
 +
-+Settings > Resource Packs:
++Settings > Resource Packs has **BROWSE RESOURCE PACKS** and **BROWSE MODS**. Both open the in-page **File Browser** (HTML drawn over the game, so the Files app opens from a real tap):
 +
-+- **IMPORT PACK (.ZIP)**: pick a resource pack zip (it must contain a `pack_info.json`, at the root or inside one folder). It is unpacked into the browser's storage and shows up in the list straight away.
-+- **IMPORT MOD (.ZIP)**: pick a mod zip (a Godot Mod Loader zip with a `mods-unpacked/<Mod>/manifest.json`). The zip is stored and the page reloads, because mods load at startup.
-+- **REMOVE ALL MODS**: press twice; deletes every imported mod and reloads.
++- The path bar starts at **AppData**, which holds two folders: `mods` and `resource_packs`. Tap a folder to open it, **Up** or **AppData** to go back, **Refresh** to re-read it.
++- **Import file...** (inside `mods` or `resource_packs`) picks a `.zip` from the Files app. A resource pack zip needs a `pack_info.json` (at the root or inside one folder) and is unpacked into the browser's storage. A mod zip is a Godot Mod Loader zip with a `mods-unpacked/<Mod>/manifest.json`.
++- **...** on a row opens the actions menu (delete).
++- **Return to Options** closes the browser. Mods load at startup, so if you added or removed a mod the page reloads at that point to apply it (import as many as you like first).
++- **REMOVE ALL MODS** (in the menu, press twice) still deletes every mod and reloads.
 +
 +Safe mode: if an imported mod stops the game from starting, open the site with `?nomods` on the end of the address (e.g. `https://you.github.io/repo/?nomods`), then use REMOVE ALL MODS.
 +
@@ -1573,10 +1691,10 @@ index c3640b4..c4a999c 100644
  	_ModLoaderCache.save_to_file()
  
 diff --git a/export_presets.cfg b/export_presets.cfg
-index 2d2877f..45d1cc9 100644
+index 2d2877f..a7b5d8c 100644
 --- a/export_presets.cfg
 +++ b/export_presets.cfg
-@@ -122,3 +122,250 @@ rm -rf \"{temp_dir}\""
+@@ -122,3 +122,364 @@ rm -rf \"{temp_dir}\""
  dotnet/include_scripts_content=false
  dotnet/include_debug_symbols=true
  dotnet/embed_build_outputs=false
@@ -1663,21 +1781,44 @@ index 2d2877f..45d1cc9 100644
 +})();
 +</script>
 +<style>
-+#smb-rotate, #smb-import { position: fixed; left: 0; top: 0; right: 0; bottom: 0; display: none; align-items: center; justify-content: center; flex-direction: column; box-sizing: border-box; padding: 24px; text-align: center; color: #fff; font: bold 14px/1.6 monospace; text-transform: uppercase; letter-spacing: 1px; -webkit-user-select: none; user-select: none; }
-+#smb-rotate { z-index: 100001; background: #000; touch-action: none; font: 20px/1.4 -apple-system, Helvetica, Arial, sans-serif; text-transform: none; letter-spacing: 0; }
-+#smb-import { z-index: 100000; background: rgba(0, 0, 0, 0.82); }
++#smb-rotate { position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 100001; display: none; align-items: center; justify-content: center; padding: 24px; box-sizing: border-box; text-align: center; color: #fff; background: #000; touch-action: none; font: 20px/1.4 -apple-system, Helvetica, Arial, sans-serif; -webkit-user-select: none; user-select: none; }
 +html.smb-portrait canvas { visibility: hidden; }
-+#smb-card { width: 100%; max-width: 360px; padding: 18px 16px; background: #111; border: 3px solid #fff; border-radius: 6px; box-sizing: border-box; }
-+#smb-title { font-size: 16px; margin-bottom: 8px; }
-+#smb-msg { font-size: 11px; opacity: 0.85; margin-bottom: 14px; min-height: 18px; }
-+.smb-btn { position: relative; display: block; margin: 8px 0 0; padding: 14px 8px; background: #fff; color: #000; border-radius: 4px; overflow: hidden; cursor: pointer; }
-+.smb-btn.sec { background: #333; color: #fff; }
-+.smb-btn input { position: absolute; left: 0; top: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; font-size: 200px; }
++#smb-fb { position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 100000; display: none; flex-direction: column; box-sizing: border-box; padding: max(8px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); background: #151515; color: #fff; font: 15px/1.35 -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; -webkit-user-select: none; user-select: none; }
++#smb-fb .fb-line { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
++#smb-fb .fb-title { flex: 1; font-size: 18px; }
++#smb-fb button { font: inherit; color: #fff; background: #1b3a5c; border: 1px solid #2c5f96; border-radius: 4px; padding: 6px 12px; min-height: 36px; -webkit-appearance: none; appearance: none; cursor: pointer; }
++#smb-fb button.red { background: #e8201c; border-color: #ff5a55; }
++#smb-fb button.crumb { background: #2a6fb5; border-color: #4a8fd5; }
++#smb-fb button.off { opacity: 0.45; }
++#smb-fb .fb-sep { opacity: 0.5; }
++#smb-fb .fb-path { display: flex; align-items: center; gap: 8px; padding: 6px; margin-bottom: 6px; background: #1f2a36; border: 1px solid #2c5f96; border-radius: 14px; }
++#smb-fb .fb-msg { min-height: 20px; margin-bottom: 6px; font-size: 13px; color: #9ad39a; }
++#smb-fb .fb-msg.bad { color: #ff8f8a; }
++#smb-fb .fb-table { flex: 1; min-height: 0; display: flex; flex-direction: column; border: 1px solid #333; }
++#smb-fb .fb-head, #smb-fb .fb-row { display: flex; align-items: center; padding: 0 10px; }
++#smb-fb .fb-head { min-height: 32px; background: #2a2a2a; border-bottom: 1px solid #3a3a3a; }
++#smb-fb .fb-rows { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
++#smb-fb .fb-row { min-height: 48px; border-bottom: 1px solid #262626; background: #101418; }
++#smb-fb .fb-row.nav { cursor: pointer; }
++#smb-fb .c-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++#smb-fb .c-size { width: 130px; flex: none; }
++#smb-fb .c-act { width: 70px; flex: none; text-align: right; }
++#smb-fb .ico { display: inline-block; min-width: 40px; margin-right: 10px; padding: 1px 0; border-radius: 3px; background: #3a3a3a; font-size: 10px; text-align: center; }
++#smb-fb .ico.dir { background: #6b5a1c; }
++#smb-fb .ico.zip { background: #8a6d0b; }
++#smb-fb .ico.pack { background: #1f6b4a; }
++#smb-fb .fb-empty { padding: 18px 12px; opacity: 0.7; }
++#smb-fb .fb-cover { position: absolute; left: 0; top: 0; right: 0; bottom: 0; display: none; align-items: center; justify-content: center; flex-direction: column; text-align: center; padding: 24px; box-sizing: border-box; }
++#smb-fb-busy { background: #151515; }
++#smb-fb-sheet { background: rgba(0, 0, 0, 0.7); }
++#smb-fb .fb-card { width: 100%; max-width: 340px; padding: 16px; background: #1c1c1c; border: 1px solid #444; border-radius: 8px; box-sizing: border-box; }
++#smb-fb .fb-card button { display: block; width: 100%; margin-top: 8px; }
++#smb-fb .fb-note { margin-top: 4px; font-size: 13px; opacity: 0.7; }
 +</style>
 +<script>
 +(function () {
-+  var ready = false, rot = null, ov = null, ttl = null, msg = null, pick = null, fileIn = null, ok = null, cancel = null;
-+  var st = { kind: '', buf: null, len: 0, max: 0, reload: 0 };
++  var ready = false, rot = null, fb = null, el = {};
++  var st = { dir: '', items: [], buf: null, len: 0, max: 0, busy: false, pending: null };
 +  var CH = 393216;
 +
 +  function isTouchDevice() {
@@ -1693,79 +1834,163 @@ index 2d2877f..45d1cc9 100644
 +    if (rot) { rot.style.display = p ? 'flex' : 'none'; }
 +  }
 +
-+  function notify(evt, name, extra) {
++  // File browser: the page draws it, Godot owns the files (see WebImporter.gd).
++  function notify(evt, dir, name, extra) {
 +    var cb = window.smbImportCallback;
-+    if (typeof cb === 'function') { cb(evt, st.kind, name || '', extra === undefined ? '' : extra); }
++    if (typeof cb === 'function') { cb(evt, dir === undefined ? st.dir : dir, name || '', extra === undefined ? '' : extra); }
 +  }
-+  function show(busy) {
-+    ov.style.display = 'flex';
-+    pick.style.display = busy ? 'none' : 'block';
-+    cancel.style.display = busy ? 'none' : 'block';
-+    ok.style.display = 'none';
++  function mk(tag, cls, text) {
++    var n = document.createElement(tag);
++    if (cls) { n.className = cls; }
++    if (text !== undefined) { n.textContent = text; }
++    return n;
 +  }
-+  function hide() { if (ov) { ov.style.display = 'none'; } }
-+  function release() { st.buf = null; st.len = 0; }
++  function btn(label, cls, fn) {
++    var b = mk('button', cls, label);
++    b.type = 'button';
++    b.addEventListener('click', function (e) { e.stopPropagation(); fn(); });
++    return b;
++  }
++  function fmtSize(n) {
++    if (typeof n !== 'number') { return ''; }
++    if (n < 1048576) { return n.toLocaleString() + ' Bytes'; }
++    return (n / 1048576).toFixed(1) + ' MB';
++  }
++  function setMsg(text, bad) { el.msg.textContent = text || ''; el.msg.className = 'fb-msg' + (bad ? ' bad' : ''); }
++  function busy(text) { st.busy = true; el.busyText.textContent = text; el.busy.style.display = 'flex'; }
++  function idle() { st.busy = false; el.busy.style.display = 'none'; }
++  function go(dir) { if (!st.busy) { setMsg(''); notify('list', dir); } }
++  function closeSheet() { el.sheet.style.display = 'none'; st.pending = null; }
++  function openSheet(it) {
++    if (st.busy) { return; }
++    st.pending = it;
++    el.sheetTitle.textContent = 'Delete ' + it.n + '?';
++    el.sheetNote.textContent = st.dir === 'mods' ? 'The mod unloads when the game reloads.' : 'The resource pack folder is deleted.';
++    el.sheet.style.display = 'flex';
++  }
++
++  function drawPath() {
++    el.path.textContent = '';
++    el.path.appendChild(btn('Up', st.dir ? '' : 'off', function () { if (st.dir) { go(''); } }));
++    el.path.appendChild(btn('AppData', 'crumb', function () { go(''); }));
++    if (st.dir) {
++      el.path.appendChild(mk('span', 'fb-sep', '>'));
++      el.path.appendChild(btn(st.dir, 'crumb', function () { go(st.dir); }));
++    }
++    el.imp.className = st.dir ? '' : 'off';
++  }
++  function drawRows() {
++    el.rows.textContent = '';
++    if (!st.items.length) {
++      el.rows.appendChild(mk('div', 'fb-empty', st.dir ? 'Nothing here yet. Tap Import file... to add a .zip.' : ''));
++      return;
++    }
++    st.items.forEach(function (it) {
++      var row = mk('div', 'fb-row' + (it.t === 'dir' ? ' nav' : ''));
++      var name = mk('div', 'c-name');
++      name.appendChild(mk('span', 'ico ' + it.t, it.t === 'dir' ? 'DIR' : (it.t === 'pack' ? 'PACK' : 'ZIP')));
++      name.appendChild(document.createTextNode(it.n));
++      row.appendChild(name);
++      row.appendChild(mk('div', 'c-size', fmtSize(it.s)));
++      var act = mk('div', 'c-act');
++      if (it.t === 'dir') {
++        row.addEventListener('click', function () { go(it.n); });
++      } else {
++        act.appendChild(btn('...', '', function () { openSheet(it); }));
++      }
++      row.appendChild(act);
++      el.rows.appendChild(row);
++    });
++  }
++  function showList(dir, items) {
++    st.dir = dir;
++    st.items = items || [];
++    drawPath();
++    drawRows();
++    fb.style.display = 'flex';
++  }
 +
 +  function build() {
 +    if (ready || !document.body) { return; }
 +    ready = true;
-+    rot = document.createElement('div');
++    rot = mk('div');
 +    rot.id = 'smb-rotate';
 +    rot.textContent = 'Please rotate your device';
 +    document.body.appendChild(rot);
-+    ov = document.createElement('div');
-+    ov.id = 'smb-import';
-+    ov.innerHTML = '<div id=\"smb-card\"><div id=\"smb-title\"></div><div id=\"smb-msg\"></div>' +
-+      '<div class=\"smb-btn\" id=\"smb-pick\">Choose .zip file<input id=\"smb-file\" type=\"file\" accept=\".zip,application/zip,application/x-zip-compressed\"></div>' +
-+      '<div class=\"smb-btn\" id=\"smb-ok\">OK</div>' +
-+      '<div class=\"smb-btn sec\" id=\"smb-cancel\">Cancel</div></div>';
-+    document.body.appendChild(ov);
-+    ttl = document.getElementById('smb-title');
-+    msg = document.getElementById('smb-msg');
-+    pick = document.getElementById('smb-pick');
-+    fileIn = document.getElementById('smb-file');
-+    ok = document.getElementById('smb-ok');
-+    cancel = document.getElementById('smb-cancel');
 +
-+    cancel.addEventListener('click', function () { hide(); notify('cancel'); });
-+    ok.addEventListener('click', function () { hide(); });
-+    // Open the chooser from the tap itself (same trick as the ROM picker): a tap on the
-+    // transparent file input is not reliable on touch browsers.
++    fb = mk('div');
++    fb.id = 'smb-fb';
++    fb.innerHTML =
++      '<div class=\"fb-line\"><div class=\"fb-title\">File Browser</div>' +
++      '<button type=\"button\" id=\"fb-refresh\">Refresh</button>' +
++      '<button type=\"button\" id=\"fb-import\">Import file...</button>' +
++      '<button type=\"button\" class=\"red\" id=\"fb-close\">Return to Options</button></div>' +
++      '<div class=\"fb-path\" id=\"fb-path\"></div>' +
++      '<div class=\"fb-msg\" id=\"fb-msg\"></div>' +
++      '<div class=\"fb-table\"><div class=\"fb-head\"><div class=\"c-name\">Name</div><div class=\"c-size\">Size</div><div class=\"c-act\">Actions</div></div>' +
++      '<div class=\"fb-rows\" id=\"fb-rows\"></div></div>' +
++      '<input id=\"fb-file\" type=\"file\" accept=\".zip,application/zip,application/x-zip-compressed\" style=\"position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none\">' +
++      '<div class=\"fb-cover\" id=\"smb-fb-busy\"><div id=\"fb-busy-text\"></div></div>' +
++      '<div class=\"fb-cover\" id=\"smb-fb-sheet\"><div class=\"fb-card\"><div id=\"fb-sheet-title\"></div><div class=\"fb-note\" id=\"fb-sheet-note\"></div>' +
++      '<button type=\"button\" class=\"red\" id=\"fb-del\">Delete</button><button type=\"button\" id=\"fb-sheet-cancel\">Cancel</button></div></div>';
++    document.body.appendChild(fb);
++    function $(id) { return document.getElementById(id); }
++    el.path = $('fb-path'); el.msg = $('fb-msg'); el.rows = $('fb-rows'); el.file = $('fb-file');
++    el.imp = $('fb-import'); el.busy = $('smb-fb-busy'); el.busyText = $('fb-busy-text');
++    el.sheet = $('smb-fb-sheet'); el.sheetTitle = $('fb-sheet-title'); el.sheetNote = $('fb-sheet-note');
++
++    $('fb-refresh').addEventListener('click', function () { go(st.dir); });
++    $('fb-close').addEventListener('click', function () {
++      if (st.busy) { return; }
++      fb.style.display = 'none';
++      notify('close');
++    });
++    $('fb-sheet-cancel').addEventListener('click', closeSheet);
++    $('fb-del').addEventListener('click', function () {
++      var it = st.pending;
++      closeSheet();
++      if (!it) { return; }
++      busy('Deleting...');
++      notify('delete', st.dir, it.n);
++    });
++
++    // Open the chooser from the tap itself (same trick as the ROM picker): a tap on a
++    // file input is not reliable on touch browsers.
 +    var lastOpen = 0;
 +    function openPicker() {
++      if (st.busy) { return; }
++      if (!st.dir) { setMsg('Open the mods or resource_packs folder, then tap Import file...', true); return; }
 +      var now = Date.now();
 +      if (now - lastOpen < 800) { return; }
 +      lastOpen = now;
-+      try { fileIn.click(); } catch (e) {}
++      try { el.file.click(); } catch (e) {}
 +    }
 +    ['touchend', 'pointerup', 'click'].forEach(function (type) {
 +      window.addEventListener(type, function (e) {
-+        if (ov.style.display === 'flex' && pick.style.display !== 'none' && pick.contains(e.target)) { openPicker(); }
++        if (fb.style.display === 'flex' && el.imp.contains(e.target)) { openPicker(); }
 +      }, true);
 +    });
-+    fileIn.addEventListener('cancel', function () { hide(); notify('cancel'); });
-+    fileIn.addEventListener('change', function () {
-+      var f = fileIn.files && fileIn.files[0];
++    el.file.addEventListener('change', function () {
++      var f = el.file.files && el.file.files[0];
 +      if (!f) { return; }
 +      if (f.size > st.max) {
-+        fileIn.value = '';
-+        msg.textContent = 'That file is too large (max ' + Math.floor(st.max / 1048576) + ' MB).';
-+        notify('error', f.name, 'too_large');
++        el.file.value = '';
++        setMsg('That file is too large (max ' + Math.floor(st.max / 1048576) + ' MB).', true);
++        notify('error', st.dir, f.name, 'too_large');
 +        return;
 +      }
-+      show(true);
-+      msg.textContent = 'Reading file...';
++      busy('Reading file...');
 +      var reader = new FileReader();
 +      reader.onerror = function () {
-+        show(false);
-+        msg.textContent = 'Could not read that file.';
-+        notify('error', f.name, 'read_error');
++        idle();
++        setMsg('Could not read that file.', true);
++        notify('error', st.dir, f.name, 'read_error');
 +      };
 +      reader.onload = function () {
 +        st.buf = reader.result;
 +        st.len = reader.result.byteLength;
-+        fileIn.value = '';
-+        notify('file', f.name, st.len);
++        el.file.value = '';
++        notify('file', st.dir, f.name, st.len);
 +      };
 +      reader.readAsArrayBuffer(f);
 +    });
@@ -1773,27 +1998,34 @@ index 2d2877f..45d1cc9 100644
 +  }
 +
 +  window.smbImporter = {
-+    prompt: function (kind, title, hint, maxBytes) {
++    open: function (dir, items, maxBytes) {
 +      build();
-+      if (!ov) { return; }
-+      st.kind = kind; st.max = maxBytes || 0;
-+      ttl.textContent = title;
-+      msg.textContent = hint;
-+      show(false);
++      if (!fb) { return; }
++      st.max = maxBytes || st.max;
++      idle();
++      closeSheet();
++      setMsg('');
++      showList(dir, items);
 +    },
-+    status: function (text) { if (ov) { show(true); msg.textContent = text; } },
++    setListing: function (dir, items, text, success) {
++      build();
++      if (!fb) { return; }
++      idle();
++      closeSheet();
++      showList(dir, items);
++      setMsg(text, !success);
++    },
++    status: function (text) { if (fb) { busy(text); } },
 +    finish: function (text, success, reloadMs) {
 +      build();
-+      if (!ov) { return; }
-+      ov.style.display = 'flex';
-+      pick.style.display = 'none';
-+      cancel.style.display = 'none';
-+      msg.textContent = text;
++      if (!fb) { return; }
++      fb.style.display = 'flex';
 +      if (reloadMs > 0) {
-+        ok.style.display = 'none';
++        busy(text);
 +        setTimeout(function () { window.location.reload(); }, reloadMs);
 +      } else {
-+        ok.style.display = 'block';
++        idle();
++        setMsg(text, !success);
 +      }
 +    },
 +    chunk: function (i) {
@@ -1806,7 +2038,7 @@ index 2d2877f..45d1cc9 100644
 +      }
 +      return btoa(bin);
 +    },
-+    release: release
++    release: function () { st.buf = null; st.len = 0; }
 +  };
 +
 +  window.addEventListener('resize', updatePortrait);
